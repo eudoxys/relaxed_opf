@@ -387,7 +387,9 @@ def _(branch, bus, case, cp, gen, np):
 
     # setup Feasible Sets
     ref = [n for n, bt in enumerate(case["bus"][:, bus.BUS_TYPE]) if bt == 3]
-    constraints = [  # practical constraints not specified in the mathematical model
+    constraints = [  
+    
+        # practical constraints not specified in the mathematical model
         a[ref] == 0,  # reference bus angle is always 0
         m[ref] == 1,  # reference bus magnitude is always 1
         cp.abs(a)
@@ -409,9 +411,9 @@ def _(branch, bus, case, cp, gen, np):
 
         b.value[i, j] = b.value[j, i] = bij
         constraints.append(p[i,j] == b[i,j] * (a[i] - a[j]))  # Equation (1a)
-        constraints.append(p[i,j] == -p[j,i])  # Equation (1a)
+        constraints.append(p[i,j] == -p[j,i])  # Equation (1a) anti-symmmetry
         constraints.append(q[i,j] == b[i,j] * (m[i] - m[j]))  # Equation (1b)
-        constraints.append(q[i,j] == -q[j,i])  # Equation (1b)
+        constraints.append(q[i,j] == -q[j,i])  # Equation (1b) anti-symmmetry
 
         s.value[i, j] = s.value[j, i] = sij
         constraints.append(cp.abs(p[i, j]) <= s[i, j])  # Equation (4a)
@@ -423,8 +425,8 @@ def _(branch, bus, case, cp, gen, np):
         :, [bus.VMIN, bus.VMAX]
     ].T  # bus voltage magnitude limits
     for j in range(N):
-        constraints.append(pd[j] == cp.sum(p[:, j]))  # Equation (2a)
-        constraints.append(qd[j] == cp.sum(q[:, j]))  # Equation (2b)
+        constraints.append(pd[j] == cp.sum(p[:, j] + pg[j]))  # Equation (2a)
+        constraints.append(qd[j] == cp.sum(q[:, j] + qg[j]))  # Equation (2b)
         constraints.append(m[j] >= vmin[j])  # Equation (5a)
         constraints.append(m[j] <= vmax[j])  # Equation (5a)
 
