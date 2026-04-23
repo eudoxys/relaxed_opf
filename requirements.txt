@@ -1,3 +1,4 @@
-marimo
 cvxpy
+marimo
+pandas
 pypower
