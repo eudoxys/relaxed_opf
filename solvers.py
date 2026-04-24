@@ -372,6 +372,7 @@ def decoupled_acosp(
     ac = cp.Variable(shape=(N,1), name="ac") # capacitor/condensor additions
     ap = cp.Variable(shape=(N,1), name="ap", nonneg=True) # generator real power additions
     aq = cp.Variable(shape=(N,1), name="aq", nonneg=True) # generator reactive power additions
+    al = cp.Variable(shape=(M,1), name="al", nonneg=True) # powerline/transformer capacity additions
 
     # gen parameters
     gi = [bi[n] for n in data["gen"][:,gen.GEN_BUS]]
@@ -381,17 +382,21 @@ def decoupled_acosp(
     qu.value[gi] = data["gen"][:,gen.QMAX].T[0] / puS
 
     # setup Feasible Sets
-    ref = [n for n, bt in enumerate(data["bus"][:, bus.BUS_TYPE]) if bt == 3]
+    ref = [n for n, x in enumerate(data["bus"][:, bus.BUS_TYPE]) if x == 3] # reference bus(ses)
+    nongen = list(set(range(N)) - set(gi)) # non-generation busses
+    powerlines = [n for n,x in enumerate(data["branch"][:,branch.TAP]) if x == 0]
+    # transformers = list(set(range(M))- set(powerlines))
 
     # cost function
-    cost = cp.sum ( ap ) # generation capacity costs
+    cost = cp.sum(ap) # + cp.sum(aq)/10 # generation capacity costs
     cost += cp.sum( # capacity/condensor costs
             ( costs["capacitor"] - costs["condensor"] ) * ac / 2
             + ( costs["capacitor"] + costs["condensor"] ) * cp.abs(ac) / 2
             )
+    cost += costs["powerline"] * cp.sum(al[powerlines]) # powerline costs
+    # cost += costs["transformer"] * cp.sum(al[transformers]) # powerline costs
 
     # constraints
-    nongen = list(set(range(N)) - set(gi)) # non-generation busses
     constraints = [
 
         # Feasible Set 2
@@ -403,7 +408,7 @@ def decoupled_acosp(
         # Feasible Set 4
         pl <= pg, pg <= pu + ap, # Equation (3a) softened to allow more generation real power
         ql - aq <= qg, qg <= qu + aq, # Equation (3b) softened to allow more generation reactive power
-        cp.abs(pf) <= s, # Equation (4a)
+        cp.abs(pf) <= s + al, # Equation (4a)
         vl <= vm, vm <= vu, # Equation (5a)
 
         # practical constraints not specified in the mathematical model
@@ -412,11 +417,12 @@ def decoupled_acosp(
         cp.abs(va) <= 0.175,  # +/- 10 degrees for decoupling assumptions to be valid
 
         # constraints on addition placements
-        ac[gi] == 0, # no capacitors/condensors are generation busses
+        ac[gi] == 0, # no capacitors/condensors at generation busses
         ap[nongen] == 0, # no new real power generation at non-generation busses
         aq[nongen] == 0, # no new reactive power generation at non-generation busses
-        ql - aq >= - ( pg + ap ), # new reactive power not to exceed new real power
-        qu + aq <= pg + ap, # new reactive power not to exceed new real power
+        
+        # limits on reactive power additions relative to real power additions
+        ql - aq >= - ( pg + ap ), qu + aq <= pg + ap, # lower and upper bounds on generation additions
     ]
 
     # problem statement
@@ -461,6 +467,7 @@ def decoupled_acosp(
             "ac (pu.MVAr)": (ac.value).round(4).T[0],
             "ap (pu.MVAr)": (ap.value).round(4).T[0],
             "aq (pu.MVAr)": (aq.value).round(4).T[0],
+            "al (pu.MVAr)": (al.value).round(4).T[0],
         }
 
         solution = copy(data)
@@ -471,6 +478,7 @@ def decoupled_acosp(
 
         solution["branch"][:,branch.PF] = pf.value.T[0] * puS
         solution["branch"][:,branch.QF] = qf.value.T[0] * puS
+        solution["branch"][:,branch.RATE_A] = solution["branch"][:,branch.RATE_A] + al.value.T[0] * puS
 
         n = [bi[x] for x in solution["gen"][:,gen.GEN_BUS]]
         solution["gen"][:,gen.PG] = pg.value[n,0] * puS
@@ -510,11 +518,11 @@ def violations(data, precision=3, formatter=None):
                 result["gen"].append((n, f"{PG=} MW outside ({PMIN=},{PMAX=})"))
             if QMIN < QMAX and not QMIN <= QG <= QMAX:
                 result["gen"].append((n, f"{QG=} MVAr outside ({QMIN=},{QMAX=})"))
-    if branch in data and data["branch"].shape[1] >= branch.QT:
+    if "branch" in data and data["branch"].shape[1] >= branch.PF:
         for n, b in enumerate(data["branch"][:,[branch.PF,branch.RATE_A]]):
-            PF, RATE_A = map(float, b)
-            if RATE_A > 0 and PF > RATE:
-                result["branch"].append((n, f"|PF|={PF} MVA outside (0,{RATE_A=})"))
+            PF, RATE_A = map(float, np.abs(b))
+            if RATE_A > 0 and PF > RATE_A:
+                result["branch"].append((n, f"|PF|={PF:.1f} MVA outside (0,{RATE_A=:.1f})"))
     if formatter:
         return formatter(result)
     return result
@@ -636,7 +644,7 @@ if __name__ == '__main__':
         
         else:
 
-            # print(internals(fast_acosp))
+            print(internals(fast_acosp))
             print("\n**********************************")
             print("*** FINAL AC OPTIMAL POWERFLOW ***")
             print("**********************************\n")
