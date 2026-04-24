@@ -151,7 +151,13 @@ def _(mo):
 def _(mo):
     mo.md(r"""
     ## Study Case
+    """)
+    return
 
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     A modified IEEE 4-bus test system [2] illustrates the conditions for which optimal sizing and placement may be required, specifically there is insufficient generation capacity, voltage support, and line capacity for optimal powerflow feasibility. In addition, the generator cost function is reduced to a unity linear function.
     """)
     return
@@ -167,7 +173,13 @@ def _(case, show_data):
 def _(mo):
     mo.md(r"""
     ## Violation Tests
+    """)
+    return
 
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     The primary test of a power flow case is whether there are any voltage, generation, or line flow violations of limits. This includes testing the following
 
     1. Are the bus voltage magnitudes `VM` within the range of `(VMIN,VMAX)`?
@@ -191,8 +203,6 @@ def _(case, show_violations):
 def _(mo):
     mo.md(r"""
     ## Initial AC Powerflow Solution
-
-    The initial full AC power flow solved using PyPower [3] converges. However, the output of generator unit 0 exceeds the maximum real power limit and the line flows on lines 1 and 2 exceeds the line ratings.
     """)
     return
 
@@ -201,6 +211,14 @@ def _(mo):
 def _(case, solvers):
     initial_powerflow = solvers.full_acpf(case, VERBOSE=0, OUT_ALL=0)
     return (initial_powerflow,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The initial full AC power flow solved using PyPower [3] converges with the results shown in Table 2(a). However, it does not satisfy Feasible Set 4, as shown in Table 2(b).
+    """)
+    return
 
 
 @app.cell
@@ -233,23 +251,23 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    mo.md(r"""
-    The full AC OPF of the case fails because there is no feasible generation output to satisfy the loads.
-    """)
-    return
-
-
-@app.cell
 def _(case, solvers):
     initial_opf = solvers.full_acopf(case,VERBOSE=0, OUT_ALL=0)
     return (initial_opf,)
 
 
 @app.cell
-def _(initial_opf, mo):
+def _(mo):
     mo.md(f"""
-    Full AC OPF {initial_opf["status"].lower()}.
+ 
+    """)
+    return
+
+
+@app.cell
+def _(initial_opf, mo):
+    mo.md(rf"""
+    The full AC OPF in `pypower` finds a solution that satisfies the voltage limits (5a) in Feasible Set 4 but it does not satisfy the generation and line flow constraints (3a), (3b), and (4a). Thus, the full AC OPF is  {initial_opf["status"].lower()} by `pypower` but it does not satisfy Feasible Set 4. The result is shown in Table 3(a) and the violations of Feasible Set 4 are shown in Table 3(b).
     """)
     return
 
@@ -274,14 +292,6 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    The decoupled powerflow problem cannot be solved without solving the optimal powerflow problem first. This is because the generator outputs must be part of the solution if the solution is to be realizable.  Since the decouple powerflow problem in Feasible Set 3 is part of Feasible Set 4, the powerflow problem will be solved as part of the optimal powerflow problem. The decoupled optimal powerflow problem can be constructed in CVX as the following feasibility problem using Feasible Set 4.
-    """)
-    return
-
-
 @app.cell
 def _(case, solvers):
     # Decoupled opf solution
@@ -289,23 +299,11 @@ def _(case, solvers):
     return (decoupled_opf,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(decoupled_opf, mo):
-    mo.md(f"""
-    Decoupled AC OPF is {decoupled_opf["status"].lower()}.
+    mo.md(rf"""
+    The decoupled optimal powerflow problem must not only satisfy the voltage constraints (5a) in Feasible Set 4, but it also must satisfy the generation constraints (3a) and (3b) as well as the line flow constraints (4a). The decoupled AC OPF is {decoupled_opf["status"].lower()} as presented in the base case.
     """)
-    return
-
-
-@app.cell
-def _(decoupled_opf, show_data):
-    show_data(decoupled_opf["solution"],caption="Table 4(a): Decoupled AC optimal powerflow solution")
-    return
-
-
-@app.cell
-def _(decoupled_opf, show_violations):
-    show_violations(decoupled_opf["solution"],caption="Table 4(b): Decoupled AC optimal powerflow violations")
     return
 
 
@@ -314,20 +312,83 @@ def _(mo):
     mo.md(r"""
     # Optimal Sizing and Placement
 
-    This section discusses how an infeasible optimal powerflow problem is converted to a feasible optimal placement problem using the following softening of constraints:
+    This section discusses how an infeasible optimal powerflow problem is converted to a feasible optimal sizing and placement (OSP) problem by following softening of constraints.
 
-    1. Capacitors can be added to raise voltage on PQ busses where `VM` is below `VMIN` by decreasing `BS`.
+    The OSP problem assumes that all defined resources are in service. The following constraints are softening by convertings them to costs per-unit of generation capacity expansion cost.
 
-    2. Condensors can be added to reduce voltage on PQ busses where `VM` is above `VMAX` by increasing `BS`.
+    1. A capacitor or condensors of size $c_i$ can be added to a PQ bus $i$ at the cost $\alpha c_i$ to raise or lower, respectively, the voltage $v_i$ when $|v_i|$ is outside the range of $(\underline v_i,\bar v_i)$.
 
-    3. Generation reactive power capacity can be added to non-PQ busses where `QG` is outside `(QMIN,QMAX)` by decreasing `QMIN` and/or increasing `QMAX`.
+    2. Added generation real power $g_i$ and reactive power $h_i$ can be provided to the non-PQ bus $i$ at the cost $\beta g$ when $p_i$ and/or $q_i$ are outside the ranges $(0,\bar p_i)$ and $(\underline q_i,\bar q_i)$, respectively, provided that $p_i + g_i <= q_i + h_i$.
 
-    4. Generation real power capacity can be added to non-PQ busses where `PG` is above `PMAX` by increasing `PMAX`.
+    3. Transformer and powerline capacity can be increased by $d_{ij}$ at the costs $\gamma_t d_{ij}$ and $\gamma_l d_{ij}$, respectively, on branches where $|p_{ij}|$ exceeds $|s_{ij}|$.
 
-    5. Transformer/line capacity can be increased where `PF` exceeds `RATE_A` by increasing `RATE_A`.
+    4. The load on PQ busses is increased to $(p_i+jq_i)(1+e_i)$ to ensure that the added assets provide a sufficient safety margin.
 
-    The costs of these capacity expansions are specified such that they are applied in that order of preference.
+    The costs and margins of these softened constraints as shown in Table 4.
+
+    Table 4: Optimal Size and Placement Softening Parameters
+
+    | Item  | Value        | Description
+    | :---: | :----------: | :----------
+    | 1.    | $\alpha=0.1$ | Capacitor addition cost (PQ bus only)
+    |       | $\alpha=1.0$ | Condensor addition cost (PQ bus only)
+    | 2.    | $\beta=1.0$  | General real-power expansion cost (non-PQ bus only)
+    |       | $\beta=0.0$  | Generator reactive power expansion cost (non-PQ bus only)
+    | 3.    | $\gamma=10$  | Transformer capacity expansions cost (branch tap is non-zero)
+    |       | $\gamma=100$ | Powerline capacity expansion cost (branch taps is zero)
+    | 4.    | $e=15$%      | Load margin
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The optimal sizing and placement problem is then stated as
+    $$
+    \begin{array}{rlr}
+        \underset{v,\theta,p,q,c,g,h,f} \min & \alpha \sum_i p_i + \beta \sum_i c_i + \gamma \sum_{ij} d_{ij} \\
+        \textrm{subject to} \\
+        & \textrm{(Feasible Set 5)} \\
+        & p_{ij} = b_{ij} (\theta_i - \theta_j) & (1a) \\
+        & q_{ij} = b_{ij} (|v_i| - |v_j|) & (1b) \\
+        & \sum_j p_{ij} = p_i~(1+e_i) & (2c) \\
+        & \sum_j q_{ij} = q_i~(1+e_i) & (2d) \\
+        \\
+        & \textrm{(Feasible Set 6)} \\
+        & \underline p_i \le p_i \le \bar p_i + g_i & (3c) \\
+        & \underline q_i - h_i \le q_i \le \bar q_i + h_i & (3d) \\
+        & |p_{ij}| \le \bar s_{ij} + d_{ij} & (4b)\\
+        & \underline v_i \le |v_i| \le \bar v_i & (5b)
+    \end{array}
+    $$
+    """)
+    return
+
+
+@app.cell
+def _(case, solvers):
+    decoupled_osp = solvers.decoupled_acosp(case)
+    return (decoupled_osp,)
+
+
+@app.cell(hide_code=True)
+def _(decoupled_osp, mo):
+    mo.md(rf"""
+    Decoupled AC OSP is {decoupled_osp["status"].lower()}.
+    """)
+    return
+
+
+@app.cell
+def _(decoupled_osp, show_data):
+    show_data(decoupled_osp["solution"],caption="Table 5(a): Decoupled AC optimal sizing and placement solution") if decoupled_osp["ok"] else None
+    return
+
+
+@app.cell
+def _(decoupled_osp, show_violations):
+    show_violations(decoupled_osp["solution"],caption="Table 5(b): Decoupled AC optimal sizing and placement violations")  if decoupled_osp["ok"] else None
     return
 
 
@@ -350,7 +411,7 @@ def _(mo, solvers):
         result = mo.vstack(
             [mo.md(caption)] +
             [
-                mo.md(f"**{x}**\n\n~~~\n{repr(y)}\n~~~\n")
+                mo.md(f"**{x}**\n~~~\n{repr(y)}\n~~~\n")
                 for x, y in data.items()
             ]
         )
