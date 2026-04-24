@@ -16,14 +16,14 @@ from pypower import idx_cost as cost
 
 def full_acpf(case:dict,**kwargs) -> dict:
     """Solve full AC powerflow"""
-    solution = runpf(case,ppoption(**kwargs))
+    solution = runpf(case,ppoption(**kwargs))[0]["order"]["int"]
     ref = [n for n, bt in enumerate(solution["bus"][:, bus.BUS_TYPE]) if bt == 3]
-    solution["bus"][:,bus.VA] = (data["Va"] - data["Va"][ref[0]])*180/np.pi
+    solution["bus"][:,bus.VA] = (solution["bus"][:,bus.VA] - solution["bus"][:,bus.VA][ref[0]])
     return {
         "case": copy(case),
         "ok": True,
         "status": "solved",
-        "solution": solution[0]["order"]["int"]
+        "solution": solution
     }
 
 def full_acopf(case:dict,**kwargs) -> dict:
@@ -81,18 +81,6 @@ def decoupled_acopf(
       - `va`: bus voltage angles
       - `pg`: real power generation dispatch
       - `qg`: reactive power generation dispatch
-
-    Description
-    -----------
-
-    Solves the optimal power flow problem using the decoupled powerflow method
-    in Taylor Chapter 3. If `softening` is specified it must include the following
-
-    - `load`: a dict with the following:
-
-      - `cost`: a cost of load curtailment per-unit of generation cost
-
-      - `limit`: a maximum fraction of load that may be curtailed
     """
     
     # default options
@@ -153,10 +141,10 @@ def decoupled_acopf(
 
     # gen parameters
     gi = [bi[n] for n in data["gen"][:,gen.GEN_BUS]]
-    pl.value[gi] = data["gen"][:,gen.PMIN].T[0] / puS
-    pu.value[gi] = data["gen"][:,gen.PMAX].T[0] / puS
-    ql.value[gi] = data["gen"][:,gen.QMIN].T[0] / puS
-    qu.value[gi] = data["gen"][:,gen.QMAX].T[0] / puS
+    pl.value[gi] = data["gen"][:,gen.GEN_STATUS] * data["gen"][:,gen.PMIN].T[0] / puS
+    pu.value[gi] = data["gen"][:,gen.GEN_STATUS] * data["gen"][:,gen.PMAX].T[0] / puS
+    ql.value[gi] = data["gen"][:,gen.GEN_STATUS] * data["gen"][:,gen.QMIN].T[0] / puS
+    qu.value[gi] = data["gen"][:,gen.GEN_STATUS] * data["gen"][:,gen.QMAX].T[0] / puS
 
     # setup Feasible Sets
     ref = [n for n, bt in enumerate(data["bus"][:, bus.BUS_TYPE]) if bt == 3]
@@ -302,18 +290,10 @@ def decoupled_acosp(
       - `va`: bus voltage angles
       - `pg`: real power generation dispatch
       - `qg`: reactive power generation dispatch
-
-    Description
-    -----------
-
-    Solves the optimal power flow problem using the decoupled powerflow method
-    in Taylor Chapter 3. If `softening` is specified it must include the following
-
-    - `load`: a dict with the following:
-
-      - `cost`: a cost of load curtailment per-unit of generation cost
-
-      - `limit`: a maximum fraction of load that may be curtailed
+      - `ac`: capacitors/condensors additions
+      - `ap`: real power generation capacity expansions
+      - `aq`: reactive power generation capacity expansions
+      - `al`: transformer and powerline capacity expansions
     """
     
     # default options
@@ -350,7 +330,7 @@ def decoupled_acosp(
         i = bi[br[branch.F_BUS]]
         j = bi[br[branch.T_BUS]]
         tap = br[branch.TAP]
-        bx = br[branch.BR_STATUS] / br[branch.BR_X] / (tap if tap > 0 else 1)
+        bx = 1 / br[branch.BR_X] / (tap if tap > 0 else 1)
         shift = br[branch.SHIFT]*np.pi/180
         b.value[n,i] = bx
         b.value[n,j] = - ( bx + shift )
@@ -412,14 +392,14 @@ def decoupled_acosp(
         # Feasible Set 2
         pf == b @ va, # Equation (1a)
         qf == b @ vm, # Equation (1b)
-        f @ pf + pd*(1+margin) == pg, # Equation (2a)
-        f @ qf + qd*(1+margin) + ac == qg, # Equation (2b)
+        f @ pf + pd*(1+margin) == pg, # Equation (2c)
+        f @ qf + qd*(1+margin) + ac == qg, # Equation (2d)
 
         # Feasible Set 4
-        pl <= pg, pg <= pu + ap, # Equation (3a) softened to allow more generation real power
-        ql - aq <= qg, qg <= qu + aq, # Equation (3b) softened to allow more generation reactive power
-        cp.abs(pf) <= s + al, # Equation (4a)
-        vl <= vm, vm <= vu, # Equation (5a)
+        pl <= pg, pg <= pu + ap, # Equation (3c)
+        ql - aq <= qg, qg <= qu + aq, # Equation (3d)
+        cp.abs(pf) <= s + al, # Equation (4b)
+        vl <= vm, vm <= vu, # Equation (5b)
 
         # practical constraints not specified in the mathematical model
         va[ref] == 0,  # reference bus angle is always 0
@@ -486,11 +466,13 @@ def decoupled_acosp(
         solution["bus"][:,bus.VM] = vm.value.T[0]
         solution["bus"][:,bus.BS] = solution["bus"][:,bus.BS] + ac.value.T[0]
 
+        solution["branch"][:,branch.BR_STATUS] = np.ones(M)
         solution["branch"][:,branch.PF] = pf.value.T[0] * puS
         solution["branch"][:,branch.QF] = qf.value.T[0] * puS
         solution["branch"][:,branch.RATE_A] = solution["branch"][:,branch.RATE_A] + al.value.T[0] * puS
 
         n = [bi[x] for x in solution["gen"][:,gen.GEN_BUS]]
+        solution["gen"][:,gen.GEN_STATUS] = np.ones(K)
         solution["gen"][:,gen.PG] = pg.value[n,0] * puS
         solution["gen"][:,gen.QG] = qg.value[n,0] * puS
         solution["gen"][:,gen.PMAX] = solution["gen"][:,gen.PMAX] + ap.value[n,0] * puS
@@ -608,19 +590,19 @@ if __name__ == '__main__':
 
     ppoptions = dict(VERBOSE=0,OUT_ALL=0)
     
-    # print("*****************")
-    # print("*** BASE CASE ***")
-    # print("*****************\n")
-    # print(*[f"{x}:\n{y}\n" for x,y in as_frames(case).items()],sep="\n")
-    # print(violations(case))
+    print("*****************")
+    print("*** BASE CASE ***")
+    print("*****************\n")
+    print(*[f"{x}:\n{y}\n" for x,y in as_frames(case).items()],sep="\n")
+    print(violations(case))
 
-    # print("\n*************************")
-    # print("*** FULL AC POWERFLOW ***")
-    # print("*************************\n")
-    # initial_acpf = full_acpf(case,**ppoptions)
-    # print("STATUS:",initial_acpf["status"])
-    # print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acpf["solution"]).items()],sep="\n")
-    # if initial_acpf["ok"]: print(violations(initial_acpf["solution"]))
+    print("\n*************************")
+    print("*** FULL AC POWERFLOW ***")
+    print("*************************\n")
+    initial_acpf = full_acpf(case,**ppoptions)
+    print("STATUS:",initial_acpf["status"])
+    print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acpf["solution"]).items()],sep="\n")
+    if initial_acpf["ok"]: print(violations(initial_acpf["solution"]))
 
     print("\n*********************************")
     print("*** FULL AC OPTIMAL POWERFLOW ***")
