@@ -268,6 +268,11 @@ def decoupled_acosp(
     - `data`: `pypower` case data
 
     - `costs`: capacity addition costs (per-unit generation cost)
+      Valid costs are
+      - `"capacitor"`: cost of adding a capacitor (default is 0.1)
+      - `"condensor"`: cost of adding a condensor (default is 1.0)
+      - `"transformer"`: cost of increasing transformer capacity (default is 2.0)
+      - `"powerline"`: cost of increasing powerline capacity (default is 10.0)
 
     - `margin`: load margin for sizing
 
@@ -314,13 +319,18 @@ def decoupled_acosp(
     # default options
     if "canon_backend" not in options:
         options["canon_backend"] = "SCIPY"
-    if costs is None:
-        costs = { # all costs per-unit generation cost $/MW
+    default_costs = { 
+            # all costs per-unit generation cost $/MW
             "capacitor": 0.1, # $/MVAr
             "condensor": 1.0, # $/MVAr
             "transformer": 2.0, # $/MVA
             "powerline": 5.0, # $/MVA
         }
+    if costs is None:
+        costs = default_costs
+    for key,value in default_costs.items():
+        if key not in costs:
+            costs[key] = value
 
     # dimensions
     N = len(data["bus"])
@@ -385,7 +395,7 @@ def decoupled_acosp(
     ref = [n for n, x in enumerate(data["bus"][:, bus.BUS_TYPE]) if x == 3] # reference bus(ses)
     nongen = list(set(range(N)) - set(gi)) # non-generation busses
     powerlines = [n for n,x in enumerate(data["branch"][:,branch.TAP]) if x == 0]
-    # transformers = list(set(range(M))- set(powerlines))
+    transformers = list(set(range(M))- set(powerlines))
 
     # cost function
     cost = cp.sum(ap) # + cp.sum(aq)/10 # generation capacity costs
@@ -394,7 +404,7 @@ def decoupled_acosp(
             + ( costs["capacitor"] + costs["condensor"] ) * cp.abs(ac) / 2
             )
     cost += costs["powerline"] * cp.sum(al[powerlines]) # powerline costs
-    # cost += costs["transformer"] * cp.sum(al[transformers]) # powerline costs
+    cost += costs["transformer"] * cp.sum(al[transformers]) # transformer costs
 
     # constraints
     constraints = [
@@ -521,7 +531,7 @@ def violations(data, precision=3, formatter=None):
     if "branch" in data and data["branch"].shape[1] >= branch.PF:
         for n, b in enumerate(data["branch"][:,[branch.PF,branch.RATE_A]]):
             PF, RATE_A = map(float, np.abs(b))
-            if RATE_A > 0 and PF > RATE_A:
+            if RATE_A > 0 and PF > RATE_A*1.001:
                 result["branch"].append((n, f"|PF|={PF:.1f} MVA outside (0,{RATE_A=:.1f})"))
     if formatter:
         return formatter(result)
@@ -539,12 +549,11 @@ def as_frames(data,showall=False,**kwargs):
         "branch": "F_BUS,T_BUS,BR_R,BR_X,BR_B,RATE_A,RATE_B,RATE_C,TAP,SHIFT,BR_STATUS,ANGMIN,ANGMAX,PF,QF,PT,QT,MU_SF,MU_ST,MU_ANGMAX,MU_ANGMIN",
         "gen":"GEN_BUS,PG,QG,QMAX,QMIN,VG,MBASE,GEN_STATUS,PMAX,PMIN,PC1,PC2,QC1MIN,QC1MAX,QC2MIN,QC2MAX,RAMP_AGC,RAMP_10,RAMP_30,RAMP_Q,APF,MU_PMAX,MU_PMIN,MU_QMAX,MU_QMIN",
         "gencost":"MODEL,STARTUP,SHUTDOWN,N,COST0,COST1,COST2",
-    }    
+    }
     return {x:pd.DataFrame(
             data[x].round(3),
             columns=y.split(",")[:data[x].shape[1]],
         )[kwargs[x].split(",") if x in kwargs else y.split(",")[:data[x].shape[1]]] for x,y in columns.items() if x in data}
-
 
 def as_mdtable(violations):
     """Format violation results as a table"""
@@ -644,7 +653,7 @@ if __name__ == '__main__':
         
         else:
 
-            print(internals(fast_acosp))
+            # print(internals(fast_acosp))
             print("\n**********************************")
             print("*** FINAL AC OPTIMAL POWERFLOW ***")
             print("**********************************\n")
