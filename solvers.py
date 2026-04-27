@@ -1,8 +1,11 @@
 """Powerflow solvers"""
 
+import os
 from copy import deepcopy as copy
+import importlib
 
 import numpy as np
+import scipy as sp
 import pandas as pd
 import cvxpy as cp
 
@@ -14,38 +17,76 @@ from pypower import idx_brch as branch
 from pypower import idx_gen as gen
 from pypower import idx_cost as cost
 
+def load(case:dict,name:str=None) -> dict:
+    """Fix case to include branch line flows"""
+    module = importlib.import_module(case)
+    if name is None:
+        name = os.path.splitext(os.path.basename(case))[0]
+        if not hasattr(module,name) and hasattr(module,"case"):
+            name = "case"
+    if callable(getattr(module,name)):
+        case = getattr(module,name)()
+    else:
+        case = getattr(module,name)
+
+    N,M = case["bus"].shape
+
+    N,M = case["branch"].shape
+    if M < branch.QT:
+        case["branch"] = np.hstack([case["branch"],np.zeros((N,branch.QT-M+1))])
+
+
+    return case
+
 def full_acpf(case:dict,**kwargs) -> dict:
     """Solve full AC powerflow"""
-    solution = runpf(case,ppoption(**kwargs))[0]["order"]["int"]
-    ref = [n for n, bt in enumerate(solution["bus"][:, bus.BUS_TYPE]) if bt == 3]
-    solution["bus"][:,bus.VA] = (solution["bus"][:,bus.VA] - solution["bus"][:,bus.VA][ref[0]])
-    return {
-        "case": copy(case),
-        "ok": True,
-        "status": "solved",
-        "solution": solution
-    }
+    result,ok = runpf(case,ppoption(**kwargs))
+    if ok:
+        solution = result["order"]["int"]
+        ref = [n for n, bt in enumerate(result["bus"][:, bus.BUS_TYPE]) if bt == 3]
+        solution["bus"][:,bus.VA] = (solution["bus"][:,bus.VA] - solution["bus"][:,bus.VA][ref[0]])
+        return {
+            "case": copy(case),
+            "ok": True,
+            "status": "solved",
+            "solution": result
+        }
+    else:
+        return {
+            "case": copy(case),
+            "ok": False,
+            "status": "failed",
+            "result": result
+        }
 
 def full_acopf(case:dict,**kwargs) -> dict:
     """Solve full AC optimal powerflow"""
     result = runopf(case,ppoption(**kwargs))
-    solution = copy(case)
-    data = result["var"]["val"]
-    solution["gen"][:,gen.PG] = data["Pg"]
-    solution["gen"][:,gen.QG] = data["Qg"][0]
-    solution = runpf(solution,ppoption(**kwargs))[0]["order"]["int"]
-    ref = [n for n, bt in enumerate(solution["bus"][:, bus.BUS_TYPE]) if bt == 3]
-    solution["bus"][:,bus.VA] = (data["Va"] - data["Va"][ref[0]])*180/np.pi
-    return {
-        "case": copy(case),
-        "ok": True,
-        "status": "solved",
-        "solution": solution
-    }
+    if result["success"]:
+        solution = copy(case)
+        data = result["var"]["val"]
+        solution["gen"][:,gen.PG] = data["Pg"]
+        solution["gen"][:,gen.QG] = data["Qg"][0]
+        solution = runpf(solution,ppoption(**kwargs))[0]["order"]["int"]
+        ref = [n for n, bt in enumerate(solution["bus"][:, bus.BUS_TYPE]) if bt == 3]
+        solution["bus"][:,bus.VA] = (data["Va"] - data["Va"][ref[0]])*180/np.pi
+        return {
+            "case": copy(case),
+            "ok": True,
+            "status": "solved",
+            "solution": solution
+        }
+    else:
+        return {
+            "case": copy(case),
+            "ok": False,
+            "status": result["raw"]["output"]["message"],
+            "result": result
+        }
 
 def decoupled_acopf(
     data:dict,
-    # costs:dict[str,float]=None,
+    curtailment:float=None,
     **options,
     ) -> dict:
     """Solve decoupled optimal powerflow problem
@@ -54,6 +95,9 @@ def decoupled_acopf(
     ---------
 
     - `data`: `pypower` case data
+
+    - `curtailment`: cost of curtailment per-unit generation cost
+      (None disables curtailment)
 
     - `**options`: `cvxpy` solver options
 
@@ -81,15 +125,13 @@ def decoupled_acopf(
       - `va`: bus voltage angles
       - `pg`: real power generation dispatch
       - `qg`: reactive power generation dispatch
+      - `pc`: real power curtailment (if any)
+      - `qc`: reactive power curtailment (if any)
     """
     
     # default options
     if "canon_backend" not in options:
         options["canon_backend"] = "SCIPY"
-    # if costs is None:
-    #     costs = { # all costs per-unit generation cost $/MWh
-    #         "curtailment": 10.0, # $/MVA
-    #     }
 
     # dimensions
     N = len(data["bus"])
@@ -99,59 +141,59 @@ def decoupled_acopf(
     # per-unit system
     puS = data["baseMVA"]
 
-    # branch parameters
-    s = cp.Parameter(shape=(M,1),value=data["branch"][:,[branch.RATE_A]]/puS,name="s",nonneg=True) # line flow limits
-    b = cp.Parameter(shape=(M,N),value=np.zeros((M,N)), name="b") # line susceptances
-    f = cp.Parameter(shape=(N,M),value=np.zeros((N,M)), name="f") # bus line flow injections
-    bi = {i: n for n, i in enumerate(data["bus"][:, bus.BUS_I])}  # bus index
-    # TODO: vectorize these transformations using sparce matrices
-    for n,br in enumerate(data["branch"]):
-        i = bi[br[branch.F_BUS]]
-        j = bi[br[branch.T_BUS]]
-        tap = br[branch.TAP]
-        bx = br[branch.BR_STATUS] / br[branch.BR_X] / (tap if tap > 0 else 1)
-        shift = br[branch.SHIFT]*np.pi/180
-        b.value[n,i] = bx
-        b.value[n,j] = - ( bx + shift )
-        f.value[i,n] = 1
-        f.value[j,n] = -1
-
     # bus parameters
-    vl = cp.Parameter(shape=(N,1), value=data["bus"][:, [bus.VMIN]], name="vl", nonneg=True) # voltage lower limit
-    vu = cp.Parameter(shape=(N,1), value=data["bus"][:, [bus.VMAX]], name="vu", nonneg=True) # voltage upper limit
-    pd = cp.Parameter(shape=(N,1), value=data["bus"][:, [bus.PD]] / puS, name="pd") # load real power
-    qd = cp.Parameter(shape=(N,1), value=data["bus"][:, [bus.QD]] / puS, name="qd") # load reactive power
+    bb = data["bus"]
+    vl = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMIN]], name="vl", nonneg=True) # voltage lower limit
+    vu = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMAX]], name="vu", nonneg=True) # voltage upper limit
+    pd = cp.Parameter(shape=(N,1), value=bb[:, [bus.PD]] / puS, name="pd") # load real power
+    qd = cp.Parameter(shape=(N,1), value=bb[:, [bus.QD]] / puS, name="qd") # load reactive power
+
+    # branch parameters
+    br = data["branch"] # branch data
+    bi = {i: n for n, i in enumerate(bb[:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
+    f_bus = [bi[x] for x in br[:,branch.F_BUS]]
+    t_bus = [bi[x] for x in br[:,branch.T_BUS]]
+    tap = br[:,branch.TAP]
+    tap[np.where(tap==0)] = 1.0
+    shift = br[:,branch.SHIFT] * np.pi / 180
+    br_status = br[:,branch.BR_STATUS]
+    br_x = br[:,branch.BR_X]
+    b = sp.sparse.coo_matrix((br_status/br_x/tap,(range(M),f_bus)),shape=(M,N)).todense() \
+        - sp.sparse.coo_matrix((br_status/br_x/tap+shift,(range(M),t_bus)),shape=(M,N)).todense() 
+    b = cp.Parameter(shape=(M,N),value=b, name="b") # line susceptances
+    f = sp.sparse.coo_matrix((br_status,(range(M),f_bus)),shape=(M,N)).todense().T \
+        - sp.sparse.coo_matrix((br_status,(range(M),t_bus)),shape=(M,N)).todense().T 
+    f = cp.Parameter(shape=(N,M),value=f, name="f") # bus line flow injections
+    s = cp.Parameter(shape=(M,1),value=br[:,[branch.RATE_A]]/puS,name="s",nonneg=True) # line flow limits
 
     # gen parameters
-    pl = cp.Parameter(shape=(N,1), value=np.zeros((N,1)), name="pl", nonneg=True) # real power lower limit
-    pu = cp.Parameter(shape=(N,1), value=np.zeros((N,1)), name="ph", nonneg=True) # real power upper limit
-    ql = cp.Parameter(shape=(N,1), value=np.zeros((N,1)), name="ql") # reactive power lower limit
-    qu = cp.Parameter(shape=(N,1), value=np.zeros((N,1)), name="qh") # reactive power upper limit
-    vg = cp.Parameter(shape=(K,1), value=data["gen"][:,[gen.VG]], name="vg") # bus voltage setpoints
+    gg = data["gen"]
+    gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
+    vg = cp.Parameter(shape=(K,1), value=gg[:,[gen.VG]], name="vg") # bus voltage setpoints
+    pl = cp.Parameter(shape=(K,1), value=gg[:,[gen.PMIN]], name="pl", nonneg=True) # real power minimum
+    pu = cp.Parameter(shape=(K,1), value=gg[:,[gen.PMAX]], name="pu", nonneg=True) # real power maximum
+    ql = cp.Parameter(shape=(K,1), value=gg[:,[gen.QMIN]], name="ql") # reactive power minimum
+    qu = cp.Parameter(shape=(K,1), value=gg[:,[gen.QMAX]], name="qu") # reactive power maximum
+    g = cp.Parameter(shape=(N,K),value=sp.sparse.coo_matrix((np.ones(K),(list(range(K)),gi)),shape=(K,N)).todense().T,name="g") # sum generators to busses
 
     # variables
     pf = cp.Variable((M,1), name="p")  # line real power flows
     qf = cp.Variable((M,1), name="q")  # line reactive power flows
     vm = cp.Variable((N,1), name="|v|", nonneg=True)  # voltage magnitudes
     va = cp.Variable((N,1), name="𝞱")  # voltage angles
-    pg = cp.Variable((N,1), name="pg", nonneg=True)  # generator real power dispatch
-    qg = cp.Variable((N,1), name="qg")  # generator reactive power dispatch
-    # pc = cp.Variable(shape=(N,1), name="pc", nonneg=True) # real power demand curtailment
-    # qc = cp.Variable(shape=(N,1), name="qc", nonneg=True) # reactive power demand curtailment
+    pg = cp.Variable((K,1), name="pg", nonneg=True)  # generator real power dispatch
+    qg = cp.Variable((K,1), name="qg")  # generator reactive power dispatch
+    if not curtailment is None:
+        pc = cp.Variable(shape=(N,1), name="pc", nonneg=True) # real power demand curtailment
+        qc = cp.Variable(shape=(N,1), name="qc") # reactive power demand curtailment
 
-    # gen parameters
-    gi = [bi[n] for n in data["gen"][:,gen.GEN_BUS]]
-    pl.value[gi] = data["gen"][:,gen.GEN_STATUS] * data["gen"][:,gen.PMIN].T[0] / puS
-    pu.value[gi] = data["gen"][:,gen.GEN_STATUS] * data["gen"][:,gen.PMAX].T[0] / puS
-    ql.value[gi] = data["gen"][:,gen.GEN_STATUS] * data["gen"][:,gen.QMIN].T[0] / puS
-    qu.value[gi] = data["gen"][:,gen.GEN_STATUS] * data["gen"][:,gen.QMAX].T[0] / puS
-
-    # setup Feasible Sets
+    # reference busses
     ref = [n for n, bt in enumerate(data["bus"][:, bus.BUS_TYPE]) if bt == 3]
 
     # cost function
-    cost = cp.sum(pg**2+qg**2)
-    # cost += costs["curtailment"] * cp.sum ( pc**2 + qc**2 ) # curtailment cost
+    cost = cp.sum(pg**2+qg**2) # TODO: replace with generation costs
+    if curtailment:
+        cost += curtailment * cp.sum ( pc**2 + qc**2 ) # curtailment cost
 
     # constraints
     constraints = [
@@ -159,10 +201,6 @@ def decoupled_acopf(
         # Feasible Set 2
         pf == b @ va, # Equation (1a)
         qf == b @ vm, # Equation (1b)
-        f @ pf + pd == pg, # Equation (2a)
-        f @ qf + qd == qg, # Equation (2b)
-        # f @ pf + pd - pc == pg, # Equation (2a) with load curtailment
-        # f @ qf + qd - qc == qg, # Equation (2b) with load curtailment
 
         # Feasible Set 4
         pl <= pg, pg <= pu, # Equation (3a)
@@ -171,14 +209,24 @@ def decoupled_acopf(
         vl <= vm, vm <= vu, # Equation (5a)
 
         # practical constraints not specified in the mathematical model
-        va[ref] == 0,  # reference bus angle is always 0
+        va[ref] == 0,  # reference bus angles are always 0
         vm[gi] == vg,  # bus voltage setpoints
         cp.abs(va) <= 0.175,  # +/- 10 degrees for decoupling assumptions to be valid
-
-        # curtailment constraints
-        # pc <= pd, # real power curtailment
-        # qd <= qd, # reactive power curtailment
     ]
+    if curtailment is None:
+        constraints += [
+            f @ pf + pd == g @ pg, # Equation (2a)
+            f @ qf + qd == g @ qg, # Equation (2b)
+        ]
+    else:
+        constraints += [
+            f @ pf + pd - pc == g @ pg, # Equation (2a) with load curtailment
+            f @ qf + qd - qc == g @ qg, # Equation (2b) with load curtailment
+
+            pc <= pd, # real power curtailment limits
+            cp.minimum(qc,0) >= cp.minimum(qd,0), # reactive power curtailment lower limits
+            cp.maximum(qc,0) <= cp.maximum(qd,0), # reactive power curtailment upper limits
+        ]
 
     # problem statement
     objective = cp.Minimize(cost)
@@ -198,6 +246,7 @@ def decoupled_acopf(
             "s (pu.MVA)": s.value.T[0],
             "b (pm.S)": b.value,
             "f (pu)": f.value,
+            "g (pu)": g.value,
             "vl (pu.kV)": vl.value.T[0],
             "vu (pu.kV)": vu.value.T[0],
             "pd (pu.MW)": pd.value.T[0],
@@ -213,27 +262,46 @@ def decoupled_acopf(
     }
     if va.value is not None:
         result["variables"] = {
-            "pf (pu.MW)": (pf.value).round(4).T[0],
-            "qf (pu.MVAr)": (qf.value).round(4).T[0],
-            "vm (pu.kV)": (vm.value).round(4).T[0],
+            "pf (pu.MW)": pf.value.round(4).T[0],
+            "qf (pu.MVAr)": qf.value.round(4).T[0],
+            "vm (pu.kV)": vm.value.round(4).T[0],
             "va (deg)": (va.value*180/np.pi).round(4).T[0],
-            "pg (pu.MW)": (pg.value).round(4).T[0],
-            "qg (pu.MVAr)": (qg.value).round(4).T[0],
+            "pg (pu.MW)": pg.value.round(4).T[0],
+            "qg (pu.MVAr)": qg.value.round(4).T[0],
         }
+        if not curtailment is None:
+            result["variables"]["pc (pu.MW)"] = pc.value.round(4).T[0]
+            result["variables"]["qc (pu.MVAr)"] = qc.value.round(4).T[0]
 
         solution = copy(data)
         
-        solution["bus"][:,bus.VA] = (va.value.T[0] - va.value.T[0][ref[0]]) * 180 / np.pi
-        solution["bus"][:,bus.VM] = vm.value.T[0]
-        # solution["bus"][:,bus.PD] = (pd.value-pc.value).T[0] * puS
-        # solution["bus"][:,bus.QD] = (qd.value-qc.value).T[0] * puS
+        # update bus data
+        bb = solution["bus"]
+        bb[:,[bus.VA]] = ( va.value - va.value.T[0][ref[0]]) * 180 / np.pi
+        bb[:,[bus.VM]] = vm.value
+        if not curtailment is None:
+            bb[:,[bus.PD]] = ( pd.value - pc.value ) * puS
+            bb[:,[bus.QD]] = ( qd.value - qc.value ) * puS
 
-        solution["branch"][:,branch.PF] = pf.value.T[0] * puS
-        solution["branch"][:,branch.QF] = qf.value.T[0] * puS
+        # update branch data
+        bb = solution["branch"]
+        bb[:,[branch.PF]] = pf.value * puS
+        bb[:,[branch.QF]] = qf.value * puS
+        bb[:,[branch.PT]] = 0
+        bb[:,[branch.QT]] = 0
 
-        n = [bi[x] for x in solution["gen"][:,gen.GEN_BUS]]
-        solution["gen"][:,gen.PG] = pg.value[n,0] * puS
-        solution["gen"][:,gen.QG] = qg.value[n,0] * puS
+        # update gen
+        gg = solution["gen"]
+        gg[:,[gen.PG]] = pg.value * puS
+        gg[:,[gen.QG]] = qg.value * puS
+
+        # print(f"{f.value=}")
+        # print(f"{pf.value=}")
+        # print(f"{f.value @ pf.value=}")
+        # print(f"{pd.value=}")
+        # print(f"{g.value=}")
+        # print(f"{pg.value=}")
+        # print(f"{g.value @ pg.value=}")
 
         result["solution"] = solution
         checks = violations(solution,formatter=dict)
@@ -321,34 +389,42 @@ def decoupled_acosp(
     puS = data["baseMVA"]
 
     # branch parameters
-    s = cp.Parameter(shape=(M,1),value=data["branch"][:,[branch.RATE_A]]/puS,name="s",nonneg=True) # line flow limits
-    b = cp.Parameter(shape=(M,N),value=np.zeros((M,N)), name="b") # line susceptances
-    f = cp.Parameter(shape=(N,M),value=np.zeros((N,M)), name="f") # bus line flow injections
-    bi = {i: n for n, i in enumerate(data["bus"][:, bus.BUS_I])}  # bus index
-    # TODO: vectorize these transformations using sparce matrices
-    for n,br in enumerate(data["branch"]):
-        i = bi[br[branch.F_BUS]]
-        j = bi[br[branch.T_BUS]]
-        tap = br[branch.TAP]
-        bx = 1 / br[branch.BR_X] / (tap if tap > 0 else 1)
-        shift = br[branch.SHIFT]*np.pi/180
-        b.value[n,i] = bx
-        b.value[n,j] = - ( bx + shift )
-        f.value[i,n] = 1
-        f.value[j,n] = -1
+    br = data["branch"] # branch data
+    bi = {i: n for n, i in enumerate(data["bus"][:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
+    f_bus = [bi[x] for x in br[:,branch.F_BUS]]
+    t_bus = [bi[x] for x in br[:,branch.T_BUS]]
+    tap = br[:,branch.TAP]
+    tap[np.where(tap==0)] = 1.0
+    shift = br[:,branch.SHIFT] * np.pi / 180
+    br_status = br[:,branch.BR_STATUS]
+    br_x = br[:,branch.BR_X]
+    b = sp.sparse.coo_matrix((br_status/br_x/tap,(range(M),f_bus)),shape=(M,N)).todense() \
+        - sp.sparse.coo_matrix((br_status/br_x/tap+shift,(range(M),t_bus)),shape=(M,N)).todense() 
+    f = sp.sparse.coo_matrix((br_status,(range(M),f_bus)),shape=(M,N)).todense().T \
+        - sp.sparse.coo_matrix((br_status,(range(M),t_bus)),shape=(M,N)).todense().T 
+    s = cp.Parameter(shape=(M,1),value=br[:,[branch.RATE_A]]/puS,name="s",nonneg=True) # line flow limits
+    b = cp.Parameter(shape=(M,N),value=b, name="b") # line susceptances
+    f = cp.Parameter(shape=(N,M),value=f, name="f") # bus line flow injections
 
     # bus parameters
-    vl = cp.Parameter(shape=(N,1), value=data["bus"][:, [bus.VMIN]], name="vl", nonneg=True) # voltage lower limit
-    vu = cp.Parameter(shape=(N,1), value=data["bus"][:, [bus.VMAX]], name="vu", nonneg=True) # voltage upper limit
-    pd = cp.Parameter(shape=(N,1), value=data["bus"][:, [bus.PD]] / puS, name="pd") # load real power
-    qd = cp.Parameter(shape=(N,1), value=data["bus"][:, [bus.QD]] / puS, name="qd") # load reactive power
+    bb = data["bus"]
+    vl = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMIN]], name="vl", nonneg=True) # voltage lower limit
+    vu = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMAX]], name="vu", nonneg=True) # voltage upper limit
+    pd = cp.Parameter(shape=(N,1), value=bb[:, [bus.PD]] / puS, name="pd") # load real power
+    qd = cp.Parameter(shape=(N,1), value=bb[:, [bus.QD]] / puS, name="qd") # load reactive power
 
     # gen parameters
-    pl = cp.Parameter(shape=(N,1), value=np.zeros((N,1)), name="pl", nonneg=True) # real power lower limit
-    pu = cp.Parameter(shape=(N,1), value=np.zeros((N,1)), name="ph", nonneg=True) # real power upper limit
-    ql = cp.Parameter(shape=(N,1), value=np.zeros((N,1)), name="ql") # reactive power lower limit
-    qu = cp.Parameter(shape=(N,1), value=np.zeros((N,1)), name="qh") # reactive power upper limit
-    vg = cp.Parameter(shape=(K,1), value=data["gen"][:,[gen.VG]], name="vg") # bus voltage setpoints
+    g = data["gen"]
+    gi = np.array([bi[n] for n in g[:,gen.GEN_BUS]])
+    pmin = sp.sparse.coo_matrix((g[:,gen.PMIN]/puS,(range(K),gi)),shape=(K,N)).todense()
+    pmax = sp.sparse.coo_matrix((g[:,gen.PMAX]/puS,(range(K),gi)),shape=(K,N)).todense()
+    qmin = sp.sparse.coo_matrix((g[:,gen.QMIN]/puS,(range(K),gi)),shape=(K,N)).todense()
+    qmax = sp.sparse.coo_matrix((g[:,gen.QMAX]/puS,(range(K),gi)),shape=(K,N)).todense()
+    pl = cp.Parameter(shape=(N,1), value=pmin.T.sum(axis=1), name="pl", nonneg=True) # real power lower limit
+    pu = cp.Parameter(shape=(N,1), value=pmax.T.sum(axis=1), name="ph", nonneg=True) # real power upper limit
+    ql = cp.Parameter(shape=(N,1), value=qmin.T.sum(axis=1), name="ql") # reactive power lower limit
+    qu = cp.Parameter(shape=(N,1), value=qmax.T.sum(axis=1), name="qh") # reactive power upper limit
+    vg = cp.Parameter(shape=(K,1), value=g[:,[gen.VG]], name="vg") # bus voltage setpoints
 
     # variables
     pf = cp.Variable((M,1), name="p")  # line real power flows
@@ -358,18 +434,11 @@ def decoupled_acosp(
     pg = cp.Variable((N,1), name="pg", nonneg=True)  # generator real power dispatch
     qg = cp.Variable((N,1), name="qg")  # generator reactive power dispatch
 
-    # softening constraints
+    # softened constraint variables
     ac = cp.Variable(shape=(N,1), name="ac") # capacitor/condensor additions
     ap = cp.Variable(shape=(N,1), name="ap", nonneg=True) # generator real power additions
     aq = cp.Variable(shape=(N,1), name="aq", nonneg=True) # generator reactive power additions
     al = cp.Variable(shape=(M,1), name="al", nonneg=True) # powerline/transformer capacity additions
-
-    # gen parameters
-    gi = [bi[n] for n in data["gen"][:,gen.GEN_BUS]]
-    pl.value[gi] = data["gen"][:,gen.PMIN].T[0] / puS
-    pu.value[gi] = data["gen"][:,gen.PMAX].T[0] / puS
-    ql.value[gi] = data["gen"][:,gen.QMIN].T[0] / puS
-    qu.value[gi] = data["gen"][:,gen.QMAX].T[0] / puS
 
     # setup Feasible Sets
     ref = [n for n, x in enumerate(data["bus"][:, bus.BUS_TYPE]) if x == 3] # reference bus(ses)
@@ -447,6 +516,7 @@ def decoupled_acosp(
         "violations": {},
     }
     if va.value is not None:
+
         result["variables"] = {
             "pf (pu.MW)": (pf.value).round(4).T[0],
             "qf (pu.MVAr)": (qf.value).round(4).T[0],
@@ -460,29 +530,43 @@ def decoupled_acosp(
             "al (pu.MVAr)": (al.value).round(4).T[0],
         }
 
+        # creates solution
         solution = copy(data)
         
+        # bus updates
         solution["bus"][:,bus.VA] = va.value.T[0] * 180 / np.pi
         solution["bus"][:,bus.VM] = vm.value.T[0]
         solution["bus"][:,bus.BS] = solution["bus"][:,bus.BS] + ac.value.T[0]
 
+        # branch updates
         solution["branch"][:,branch.BR_STATUS] = np.ones(M)
         solution["branch"][:,branch.PF] = pf.value.T[0] * puS
         solution["branch"][:,branch.QF] = qf.value.T[0] * puS
         solution["branch"][:,branch.RATE_A] = solution["branch"][:,branch.RATE_A] + al.value.T[0] * puS
 
-        n = [bi[x] for x in solution["gen"][:,gen.GEN_BUS]]
+        # generator updates
         solution["gen"][:,gen.GEN_STATUS] = np.ones(K)
-        solution["gen"][:,gen.PG] = pg.value[n,0] * puS
-        solution["gen"][:,gen.QG] = qg.value[n,0] * puS
-        solution["gen"][:,gen.PMAX] = solution["gen"][:,gen.PMAX] + ap.value[n,0] * puS
-        solution["gen"][:,gen.QMIN] = solution["gen"][:,gen.QMIN] - aq.value[n,0] * puS
-        solution["gen"][:,gen.QMAX] = solution["gen"][:,gen.QMAX] + aq.value[n,0] * puS
+        solution["gen"][:,gen.PG] = pg.value[gi,0] * puS
+        solution["gen"][:,gen.QG] = qg.value[gi,0] * puS
+        print(f"{gi=},{pu.value.T=}")
+        solution["gen"][:,gen.PMAX] = solution["gen"][:,gen.PMAX] + ap.value[gi,0] / abs(pu.value[gi]) * puS
+        solution["gen"][:,gen.QMIN] = solution["gen"][:,gen.QMIN] - aq.value[gi,0] / abs(ql.value[gi]) * puS
+        solution["gen"][:,gen.QMAX] = solution["gen"][:,gen.QMAX] + aq.value[gi,0] / abs(qu.value[gi])* puS
 
         result["solution"] = solution
+
+        # TODO create update list
+        updates = []
+        # ac
+        # ap/aq
+        # al
+        result["additions"] = updates
+
+        # create violations list
         checks = violations(solution,formatter=dict)
         if checks:
             result["violations"] = checks
+        
         result["ok"] = True
 
     return result
@@ -583,7 +667,7 @@ def internals(case):
     
 if __name__ == '__main__':
     
-    from case4r import case
+    case = load("case4r")
     
     pd.options.display.max_columns = None
     pd.options.display.width = None
@@ -602,17 +686,20 @@ if __name__ == '__main__':
     initial_acpf = full_acpf(case,**ppoptions)
     print("STATUS:",initial_acpf["status"])
     print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acpf["solution"]).items()],sep="\n")
-    if initial_acpf["ok"]: print(violations(initial_acpf["solution"]))
+    if initial_acpf["ok"]: 
+        print(violations(initial_acpf["solution"]))
 
     print("\n*********************************")
     print("*** FULL AC OPTIMAL POWERFLOW ***")
     print("*********************************\n")
     initial_acopf = full_acopf(case,**ppoptions)
     print("STATUS:",initial_acopf["status"])
-    print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acopf["solution"]).items()],sep="\n")
-    if initial_acopf["ok"]: print(violations(initial_acopf["solution"]))
+    if initial_acopf["ok"]:
+        print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acopf["solution"]).items()],sep="\n")
+    if initial_acopf["ok"]: 
+        print(violations(initial_acopf["solution"]))
 
-    print("\n************************************")
+    print("\n**************************************")
     print("*** DECOUPLED AC OPTIMAL POWERFLOW ***")
     print("**************************************\n")
     fast_acopf = decoupled_acopf(case)
@@ -620,7 +707,7 @@ if __name__ == '__main__':
     print(*[f"{x}:\n{y}\n" for x,y in as_frames(fast_acopf["solution"]).items()],sep="\n")
     if fast_acopf["ok"]: 
         print(violations(fast_acopf["solution"]))
-    
+
     else:
 
         print("\n***********************************")
@@ -635,12 +722,33 @@ if __name__ == '__main__':
         
         else:
 
-            # print(internals(fast_acosp))
+            print("\n**************************")
+            print("*** FINAL AC POWERFLOW ***")
+            print("**************************\n")
+            final_acpf = full_acpf(fast_acosp["solution"],**ppoptions)
+            print("STATUS:",final_acpf["status"])
+            if final_acpf["ok"]:
+                print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_acpf["solution"]).items()],sep="\n")
+            if final_acpf["ok"]: 
+                print(violations(final_acpf["solution"]))
+
             print("\n**********************************")
             print("*** FINAL AC OPTIMAL POWERFLOW ***")
             print("**********************************\n")
             final_acopf = full_acopf(fast_acosp["solution"],**ppoptions)
             print("STATUS:",final_acopf["status"])
-            print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_acopf["solution"]).items()],sep="\n")
-            if final_acopf["ok"]: print(violations(final_acopf["solution"]))
+            if final_acopf["ok"]:
+                print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_acopf["solution"]).items()],sep="\n")
+            if final_acopf["ok"]: 
+                print(violations(final_acopf["solution"]))
+
+            print("\n**************************")
+            print("*** FINAL DECOUPLED OPF ***")
+            print("**************************\n")
+            final_opf = decoupled_acopf(fast_acosp["solution"])
+            print("STATUS:",final_opf["status"])
+            if final_opf["ok"]:
+                print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_opf["solution"]).items()],sep="\n")
+            if final_opf["ok"]: 
+                print(violations(final_opf["solution"]))
 
