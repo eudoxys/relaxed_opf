@@ -3,6 +3,8 @@
 import os
 from copy import deepcopy as copy
 import importlib
+import warnings
+from time import time
 
 import numpy as np
 import scipy as sp
@@ -35,32 +37,37 @@ def load(case:dict,name:str=None) -> dict:
     if M < branch.QT:
         case["branch"] = np.hstack([case["branch"],np.zeros((N,branch.QT-M+1))])
 
-
     return case
 
 def full_acpf(case:dict,**kwargs) -> dict:
     """Solve full AC powerflow"""
+    tic = time()
     result,ok = runpf(case,ppoption(**kwargs))
     if ok:
         solution = result["order"]["int"]
         ref = [n for n, bt in enumerate(result["bus"][:, bus.BUS_TYPE]) if bt == 3]
         solution["bus"][:,bus.VA] = (solution["bus"][:,bus.VA] - solution["bus"][:,bus.VA][ref[0]])
-        return {
+        result = {
             "case": copy(case),
             "ok": True,
             "status": "solved",
-            "solution": result
+            "solution": result,
         }
     else:
-        return {
+        result = {
             "case": copy(case),
             "ok": False,
             "status": "failed",
-            "result": result
+            "result": result,
+            "time": toc-tic,
         }
+    toc = time()
+    result["time"] = toc-tic
+    return result
 
 def full_acopf(case:dict,**kwargs) -> dict:
     """Solve full AC optimal powerflow"""
+    tic = time()
     result = runopf(case,ppoption(**kwargs))
     if result["success"]:
         solution = copy(case)
@@ -70,19 +77,22 @@ def full_acopf(case:dict,**kwargs) -> dict:
         solution = runpf(solution,ppoption(**kwargs))[0]["order"]["int"]
         ref = [n for n, bt in enumerate(solution["bus"][:, bus.BUS_TYPE]) if bt == 3]
         solution["bus"][:,bus.VA] = (data["Va"] - data["Va"][ref[0]])*180/np.pi
-        return {
+        result = {
             "case": copy(case),
             "ok": True,
             "status": "solved",
-            "solution": solution
+            "solution": solution,
         }
     else:
-        return {
+        result = {
             "case": copy(case),
             "ok": False,
             "status": result["raw"]["output"]["message"],
-            "result": result
+            "result": result,
         }
+    toc = time()
+    result["time"] = toc-tic
+    return result
 
 def decoupled_acopf(
     data:dict,
@@ -127,8 +137,17 @@ def decoupled_acopf(
       - `qg`: reactive power generation dispatch
       - `pc`: real power curtailment (if any)
       - `qc`: reactive power curtailment (if any)
+
+    Caveats
+    -------
+
+    Placing a generator at a reference bus (`BUS_TYPE==3`) may result in OPF
+    solution that violate generation limits at the bus. A warning is
+    emitted by OSP when this is possible.
     """
     
+    tic = time()
+
     # default options
     if "canon_backend" not in options:
         options["canon_backend"] = "SCIPY"
@@ -170,8 +189,8 @@ def decoupled_acopf(
     gg = data["gen"]
     gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
     vg = cp.Parameter(shape=(K,1), value=gg[:,[gen.VG]], name="vg") # bus voltage setpoints
-    pl = cp.Parameter(shape=(K,1), value=gg[:,[gen.PMIN]], name="pl", nonneg=True) # real power minimum
-    pu = cp.Parameter(shape=(K,1), value=gg[:,[gen.PMAX]], name="pu", nonneg=True) # real power maximum
+    pl = cp.Parameter(shape=(K,1), value=gg[:,[gen.PMIN]], name="pl") # real power minimum
+    pu = cp.Parameter(shape=(K,1), value=gg[:,[gen.PMAX]], name="pu") # real power maximum
     ql = cp.Parameter(shape=(K,1), value=gg[:,[gen.QMIN]], name="ql") # reactive power minimum
     qu = cp.Parameter(shape=(K,1), value=gg[:,[gen.QMAX]], name="qu") # reactive power maximum
     g = cp.Parameter(shape=(N,K),value=sp.sparse.coo_matrix((np.ones(K),(list(range(K)),gi)),shape=(K,N)).todense().T,name="g") # sum generators to busses
@@ -191,9 +210,10 @@ def decoupled_acopf(
     ref = [n for n, bt in enumerate(data["bus"][:, bus.BUS_TYPE]) if bt == 3]
 
     # cost function
-    cost = cp.sum(pg**2+qg**2) # TODO: replace with generation costs
-    if curtailment:
-        cost += curtailment * cp.sum ( pc**2 + qc**2 ) # curtailment cost
+    # cost = cp.sum(pg**2+qg**2) # TODO: replace with generation costs
+    # if curtailment:
+    #     cost += curtailment * cp.sum ( pc**2 + qc**2 ) # curtailment cost
+    cost = 0
 
     # constraints
     constraints = [
@@ -260,14 +280,14 @@ def decoupled_acopf(
         "solution": {},
         "violations": {},
     }
-    if va.value is not None:
+    if problem.status == "optimal":
         result["variables"] = {
-            "pf (pu.MW)": pf.value.round(4).T[0],
-            "qf (pu.MVAr)": qf.value.round(4).T[0],
-            "vm (pu.kV)": vm.value.round(4).T[0],
-            "va (deg)": (va.value*180/np.pi).round(4).T[0],
-            "pg (pu.MW)": pg.value.round(4).T[0],
-            "qg (pu.MVAr)": qg.value.round(4).T[0],
+            "pf (pu.MW)": pf.value.T[0],
+            "qf (pu.MVAr)": qf.value.T[0],
+            "vm (pu.kV)": vm.value.T[0],
+            "va (deg)": (va.value*180/np.pi).T[0],
+            "pg (pu.MW)": pg.value.T[0],
+            "qg (pu.MVAr)": qg.value.T[0],
         }
         if not curtailment is None:
             result["variables"]["pc (pu.MW)"] = pc.value.round(4).T[0]
@@ -295,26 +315,21 @@ def decoupled_acopf(
         gg[:,[gen.PG]] = pg.value * puS
         gg[:,[gen.QG]] = qg.value * puS
 
-        # print(f"{f.value=}")
-        # print(f"{pf.value=}")
-        # print(f"{f.value @ pf.value=}")
-        # print(f"{pd.value=}")
-        # print(f"{g.value=}")
-        # print(f"{pg.value=}")
-        # print(f"{g.value @ pg.value=}")
-
         result["solution"] = solution
         checks = violations(solution,formatter=dict)
         if checks:
             result["violations"] = checks
         result["ok"] = True
 
+    toc = time()
+    result["time"] = toc-tic
     return result
 
 def decoupled_acosp(
     data:dict,
     costs:dict[str,float]=None,
     margin:float=0.15,
+    allin:bool=True,
     **options) -> dict:
     """Solve decoupled optimal sizing/placement problem
     
@@ -331,6 +346,8 @@ def decoupled_acosp(
       - `"powerline"`: cost of increasing powerline capacity (default is 10.0)
 
     - `margin`: load margin for sizing
+
+    - `allin`: enable use of all available resources
 
     - `**options`: `cvxpy` solver options
 
@@ -364,9 +381,13 @@ def decoupled_acosp(
       - `al`: transformer and powerline capacity expansions
     """
     
+    tic = time()
+
     # default options
     if "canon_backend" not in options:
         options["canon_backend"] = "SCIPY"
+
+    # default costs, if needed
     default_costs = { 
             # all costs per-unit generation cost $/MW
             "capacitor": 0.1, # $/MVAr
@@ -376,9 +397,10 @@ def decoupled_acosp(
         }
     if costs is None:
         costs = default_costs
-    for key,value in default_costs.items():
-        if key not in costs:
-            costs[key] = value
+    else:
+        for key,value in default_costs.items():
+            if key not in costs:
+                costs[key] = value
 
     # dimensions
     N = len(data["bus"])
@@ -388,56 +410,54 @@ def decoupled_acosp(
     # per-unit system
     puS = data["baseMVA"]
 
+   # bus parameters
+    bb = data["bus"]
+    vl = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMIN]], name="vl", nonneg=True) # voltage lower limit
+    vu = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMAX]], name="vu", nonneg=True) # voltage upper limit
+    pd = cp.Parameter(shape=(N,1), value=bb[:, [bus.PD]]/puS, name="pd") # load real power
+    qd = cp.Parameter(shape=(N,1), value=bb[:, [bus.QD]]/puS, name="qd") # load reactive power
+
     # branch parameters
     br = data["branch"] # branch data
-    bi = {i: n for n, i in enumerate(data["bus"][:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
+    bi = {i: n for n, i in enumerate(bb[:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
     f_bus = [bi[x] for x in br[:,branch.F_BUS]]
     t_bus = [bi[x] for x in br[:,branch.T_BUS]]
     tap = br[:,branch.TAP]
     tap[np.where(tap==0)] = 1.0
     shift = br[:,branch.SHIFT] * np.pi / 180
-    br_status = br[:,branch.BR_STATUS]
+    br_status = np.ones(M) if allin else br[:,branch.BR_STATUS] 
     br_x = br[:,branch.BR_X]
     b = sp.sparse.coo_matrix((br_status/br_x/tap,(range(M),f_bus)),shape=(M,N)).todense() \
         - sp.sparse.coo_matrix((br_status/br_x/tap+shift,(range(M),t_bus)),shape=(M,N)).todense() 
+    b = cp.Parameter(shape=(M,N),value=b, name="b") # line susceptances
     f = sp.sparse.coo_matrix((br_status,(range(M),f_bus)),shape=(M,N)).todense().T \
         - sp.sparse.coo_matrix((br_status,(range(M),t_bus)),shape=(M,N)).todense().T 
-    s = cp.Parameter(shape=(M,1),value=br[:,[branch.RATE_A]]/puS,name="s",nonneg=True) # line flow limits
-    b = cp.Parameter(shape=(M,N),value=b, name="b") # line susceptances
     f = cp.Parameter(shape=(N,M),value=f, name="f") # bus line flow injections
-
-    # bus parameters
-    bb = data["bus"]
-    vl = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMIN]], name="vl", nonneg=True) # voltage lower limit
-    vu = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMAX]], name="vu", nonneg=True) # voltage upper limit
-    pd = cp.Parameter(shape=(N,1), value=bb[:, [bus.PD]] / puS, name="pd") # load real power
-    qd = cp.Parameter(shape=(N,1), value=bb[:, [bus.QD]] / puS, name="qd") # load reactive power
+    s = cp.Parameter(shape=(M,1),value=br[:,[branch.RATE_A]]/puS,name="s",nonneg=True) # line flow limits
 
     # gen parameters
-    g = data["gen"]
-    gi = np.array([bi[n] for n in g[:,gen.GEN_BUS]])
-    pmin = sp.sparse.coo_matrix((g[:,gen.PMIN]/puS,(range(K),gi)),shape=(K,N)).todense()
-    pmax = sp.sparse.coo_matrix((g[:,gen.PMAX]/puS,(range(K),gi)),shape=(K,N)).todense()
-    qmin = sp.sparse.coo_matrix((g[:,gen.QMIN]/puS,(range(K),gi)),shape=(K,N)).todense()
-    qmax = sp.sparse.coo_matrix((g[:,gen.QMAX]/puS,(range(K),gi)),shape=(K,N)).todense()
-    pl = cp.Parameter(shape=(N,1), value=pmin.T.sum(axis=1), name="pl", nonneg=True) # real power lower limit
-    pu = cp.Parameter(shape=(N,1), value=pmax.T.sum(axis=1), name="ph", nonneg=True) # real power upper limit
-    ql = cp.Parameter(shape=(N,1), value=qmin.T.sum(axis=1), name="ql") # reactive power lower limit
-    qu = cp.Parameter(shape=(N,1), value=qmax.T.sum(axis=1), name="qh") # reactive power upper limit
-    vg = cp.Parameter(shape=(K,1), value=g[:,[gen.VG]], name="vg") # bus voltage setpoints
+    gg = data["gen"]
+    gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
+    gs = 1 if allin else gg[:,gen.GEN_STATUS]
+    vg = cp.Parameter(shape=(K,1), value=gg[:,[gen.VG]], name="vg") # bus voltage setpoints
+    pl = cp.Parameter(shape=(K,1), value=gs*gg[:,[gen.PMIN]]/puS, name="pl") # real power minimum
+    pu = cp.Parameter(shape=(K,1), value=gs*gg[:,[gen.PMAX]]/puS, name="pu") # real power maximum
+    ql = cp.Parameter(shape=(K,1), value=gs*gg[:,[gen.QMIN]]/puS, name="ql") # reactive power minimum
+    qu = cp.Parameter(shape=(K,1), value=gs*gg[:,[gen.QMAX]]/puS, name="qu") # reactive power maximum
+    g = cp.Parameter(shape=(N,K),value=sp.sparse.coo_matrix((np.ones(K),(list(range(K)),gi)),shape=(K,N)).todense().T,name="g") # sum generators to busses
 
     # variables
     pf = cp.Variable((M,1), name="p")  # line real power flows
     qf = cp.Variable((M,1), name="q")  # line reactive power flows
     vm = cp.Variable((N,1), name="|v|", nonneg=True)  # voltage magnitudes
     va = cp.Variable((N,1), name="𝞱")  # voltage angles
-    pg = cp.Variable((N,1), name="pg", nonneg=True)  # generator real power dispatch
-    qg = cp.Variable((N,1), name="qg")  # generator reactive power dispatch
+    pg = cp.Variable((K,1), name="pg", nonneg=True)  # generator real power dispatch
+    qg = cp.Variable((K,1), name="qg")  # generator reactive power dispatch
 
     # softened constraint variables
     ac = cp.Variable(shape=(N,1), name="ac") # capacitor/condensor additions
-    ap = cp.Variable(shape=(N,1), name="ap", nonneg=True) # generator real power additions
-    aq = cp.Variable(shape=(N,1), name="aq", nonneg=True) # generator reactive power additions
+    ap = cp.Variable(shape=(K,1), name="ap", nonneg=True) # generator real power additions
+    aq = cp.Variable(shape=(K,1), name="aq", nonneg=True) # generator reactive power additions
     al = cp.Variable(shape=(M,1), name="al", nonneg=True) # powerline/transformer capacity additions
 
     # setup Feasible Sets
@@ -445,6 +465,8 @@ def decoupled_acosp(
     nongen = list(set(range(N)) - set(gi)) # non-generation busses
     powerlines = [n for n,x in enumerate(data["branch"][:,branch.TAP]) if x == 0]
     transformers = list(set(range(M))- set(powerlines))
+    for gr in list(set(gi) & set(ref)):
+        warnings.warn(f"generator at reference bus[{gr}] may result in unexpected violations")
 
     # cost function
     cost = cp.sum(ap) # + cp.sum(aq)/10 # generation capacity costs
@@ -461,8 +483,8 @@ def decoupled_acosp(
         # Feasible Set 2
         pf == b @ va, # Equation (1a)
         qf == b @ vm, # Equation (1b)
-        f @ pf + pd*(1+margin) == pg, # Equation (2c)
-        f @ qf + qd*(1+margin) + ac == qg, # Equation (2d)
+        f @ pf + pd*(1+margin) == g @ pg, # Equation (2c)
+        f @ qf + qd*(1+margin) + ac == g @ qg, # Equation (2d)
 
         # Feasible Set 4
         pl <= pg, pg <= pu + ap, # Equation (3c)
@@ -477,11 +499,10 @@ def decoupled_acosp(
 
         # constraints on addition placements
         ac[gi] == 0, # no capacitors/condensors at generation busses
-        ap[nongen] == 0, # no new real power generation at non-generation busses
-        aq[nongen] == 0, # no new reactive power generation at non-generation busses
         
         # limits on reactive power additions relative to real power additions
-        ql - aq >= - ( pg + ap ), qu + aq <= pg + ap, # lower and upper bounds on generation additions
+        # ql - aq >= - ( pg + ap ), qu + aq <= pg + ap, # lower and upper bounds on generation additions
+        qu + aq <= pu + ap,
     ]
 
     # problem statement
@@ -515,19 +536,19 @@ def decoupled_acosp(
         "solution": {},
         "violations": {},
     }
-    if va.value is not None:
+    if problem.status == "optimal":
 
         result["variables"] = {
-            "pf (pu.MW)": (pf.value).round(4).T[0],
-            "qf (pu.MVAr)": (qf.value).round(4).T[0],
-            "vm (pu.kV)": (vm.value).round(4).T[0],
-            "va (deg)": (va.value*180/np.pi).round(4).T[0],
-            "pg (pu.MW)": (pg.value).round(4).T[0],
-            "qg (pu.MVAr)": (qg.value).round(4).T[0],
-            "ac (pu.MVAr)": (ac.value).round(4).T[0],
-            "ap (pu.MVAr)": (ap.value).round(4).T[0],
-            "aq (pu.MVAr)": (aq.value).round(4).T[0],
-            "al (pu.MVAr)": (al.value).round(4).T[0],
+            "pf (pu.MW)": pf.value.T[0],
+            "qf (pu.MVAr)": qf.value.T[0],
+            "vm (pu.kV)": vm.value.T[0],
+            "va (deg)": (va.value*180/np.pi).T[0],
+            "pg (pu.MW)": pg.value.T[0],
+            "qg (pu.MVAr)": qg.value.T[0],
+            "ac (pu.MVAr)": ac.value.T[0],
+            "ap (pu.MVAr)": ap.value.T[0],
+            "aq (pu.MVAr)": aq.value.T[0],
+            "al (pu.MVAr)": al.value.T[0],
         }
 
         # creates solution
@@ -539,19 +560,24 @@ def decoupled_acosp(
         solution["bus"][:,bus.BS] = solution["bus"][:,bus.BS] + ac.value.T[0]
 
         # branch updates
-        solution["branch"][:,branch.BR_STATUS] = np.ones(M)
-        solution["branch"][:,branch.PF] = pf.value.T[0] * puS
-        solution["branch"][:,branch.QF] = qf.value.T[0] * puS
-        solution["branch"][:,branch.RATE_A] = solution["branch"][:,branch.RATE_A] + al.value.T[0] * puS
-
+        if allin:
+            solution["branch"][:,branch.BR_STATUS] = np.ones(M)
+        solution["branch"][:,[branch.PF]] = pf.value * puS
+        solution["branch"][:,[branch.QF]] = qf.value * puS
+        ratio = al.value * puS/solution["branch"][:,[branch.RATE_A]] + 1
+        columns = [branch.RATE_A,branch.RATE_B,branch.RATE_C] # raised values
+        solution["branch"][:,columns] = solution["branch"][:,columns] * ratio
+        columns = [branch.BR_R,branch.BR_X,branch.BR_B] # lowered values
+        solution["branch"][:,columns] = solution["branch"][:,columns] / ratio
+        
         # generator updates
-        solution["gen"][:,gen.GEN_STATUS] = np.ones(K)
-        solution["gen"][:,gen.PG] = pg.value[gi,0] * puS
-        solution["gen"][:,gen.QG] = qg.value[gi,0] * puS
-        print(f"{gi=},{pu.value.T=}")
-        solution["gen"][:,gen.PMAX] = solution["gen"][:,gen.PMAX] + ap.value[gi,0] / abs(pu.value[gi]) * puS
-        solution["gen"][:,gen.QMIN] = solution["gen"][:,gen.QMIN] - aq.value[gi,0] / abs(ql.value[gi]) * puS
-        solution["gen"][:,gen.QMAX] = solution["gen"][:,gen.QMAX] + aq.value[gi,0] / abs(qu.value[gi])* puS
+        if allin:
+            solution["gen"][:,gen.GEN_STATUS] = np.ones(K)
+        solution["gen"][:,[gen.PG]] = pg.value * puS
+        solution["gen"][:,[gen.QG]] = qg.value * puS
+        solution["gen"][:,[gen.PMAX]] = solution["gen"][:,[gen.PMAX]] + ap.value * puS
+        solution["gen"][:,[gen.QMIN]] = solution["gen"][:,[gen.QMIN]] - aq.value * puS
+        solution["gen"][:,[gen.QMAX]] = solution["gen"][:,[gen.QMAX]] + aq.value * puS
 
         result["solution"] = solution
 
@@ -560,7 +586,7 @@ def decoupled_acosp(
         # ac
         # ap/aq
         # al
-        result["additions"] = updates
+        result["updates"] = updates
 
         # create violations list
         checks = violations(solution,formatter=dict)
@@ -569,13 +595,14 @@ def decoupled_acosp(
         
         result["ok"] = True
 
+    toc = time()
+    result["time"] = toc - tic
     return result
 
 def violations(data, precision=3, formatter=None):
     """Enumerate violations in case"""
-    if formatter is None:
-        formatter = as_table
     result = {"bus": [], "gen": [], "branch": []}
+
     if "bus" in data:
         for n, v in enumerate(
             data["bus"][:, (bus.VM, bus.VA, bus.VMIN, bus.VMAX)].round(precision)
@@ -599,9 +626,15 @@ def violations(data, precision=3, formatter=None):
             PF, RATE_A = map(float, np.abs(b))
             if RATE_A > 0 and PF > RATE_A*1.001:
                 result["branch"].append((n, f"|PF|={PF:.1f} MVA outside (0,{RATE_A=:.1f})"))
-    if formatter:
-        return formatter(result)
-    return result
+    match formatter:
+        case None:
+            return result
+        case "counter":
+            return sum([len(x) for x in result.values()])
+        case "table":
+            return as_table(result)
+        case "_":
+            return formatter(result)
 
 def as_frames(data,showall=False,**kwargs):
     """Return case data as dataframes"""
@@ -614,7 +647,7 @@ def as_frames(data,showall=False,**kwargs):
         "bus":"BUS_I,BUS_TYPE,PD,QD,GS,BS,BUS_AREA,VM,VA,BASE_KV,ZONE,VMAX,VMIN,LAM_P,LAM_Q,MU_VMAX,MY_VMIN",
         "branch": "F_BUS,T_BUS,BR_R,BR_X,BR_B,RATE_A,RATE_B,RATE_C,TAP,SHIFT,BR_STATUS,ANGMIN,ANGMAX,PF,QF,PT,QT,MU_SF,MU_ST,MU_ANGMAX,MU_ANGMIN",
         "gen":"GEN_BUS,PG,QG,QMAX,QMIN,VG,MBASE,GEN_STATUS,PMAX,PMIN,PC1,PC2,QC1MIN,QC1MAX,QC2MIN,QC2MAX,RAMP_AGC,RAMP_10,RAMP_30,RAMP_Q,APF,MU_PMAX,MU_PMIN,MU_QMAX,MU_QMIN",
-        "gencost":"MODEL,STARTUP,SHUTDOWN,N,COST0,COST1,COST2",
+        # "gencost":"MODEL,STARTUP,SHUTDOWN,N,COST0,COST1,COST2",
     }
     return {x:pd.DataFrame(
             data[x].round(3),
@@ -667,88 +700,112 @@ def internals(case):
     
 if __name__ == '__main__':
     
-    case = load("case4r")
-    
-    pd.options.display.max_columns = None
-    pd.options.display.width = None
+    import re
 
-    ppoptions = dict(VERBOSE=0,OUT_ALL=0)
-    
-    print("*****************")
-    print("*** BASE CASE ***")
-    print("*****************\n")
-    print(*[f"{x}:\n{y}\n" for x,y in as_frames(case).items()],sep="\n")
-    print(violations(case))
+    results = {}
 
-    print("\n*************************")
-    print("*** FULL AC POWERFLOW ***")
-    print("*************************\n")
-    initial_acpf = full_acpf(case,**ppoptions)
-    print("STATUS:",initial_acpf["status"])
-    print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acpf["solution"]).items()],sep="\n")
-    if initial_acpf["ok"]: 
-        print(violations(initial_acpf["solution"]))
+    testlist = [os.path.splitext(x)[0]  for x in os.listdir() if x.startswith("case") and x.endswith(".py")]
+    for name in sorted(sorted(testlist),key=lambda x:int(re.match("[^0-9]*([0-9]+)",x).group(1))):
 
-    print("\n*********************************")
-    print("*** FULL AC OPTIMAL POWERFLOW ***")
-    print("*********************************\n")
-    initial_acopf = full_acopf(case,**ppoptions)
-    print("STATUS:",initial_acopf["status"])
-    if initial_acopf["ok"]:
-        print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acopf["solution"]).items()],sep="\n")
-    if initial_acopf["ok"]: 
-        print(violations(initial_acopf["solution"]))
+        tic = time()
 
-    print("\n**************************************")
-    print("*** DECOUPLED AC OPTIMAL POWERFLOW ***")
-    print("**************************************\n")
-    fast_acopf = decoupled_acopf(case)
-    print("STATUS:",fast_acopf["status"])
-    print(*[f"{x}:\n{y}\n" for x,y in as_frames(fast_acopf["solution"]).items()],sep="\n")
-    if fast_acopf["ok"]: 
-        print(violations(fast_acopf["solution"]))
+        print(f"Processing {name}",end="...",flush=True)
+        with open(f"{name}.txt","w") as fh:
+            case = load(name)
+            results[name] = {
+                "Base case": "-",
+                "Initial fast OPF": "-",
+                "Initial full PF": "-",
+                "Fast OSP": "-",
+                "Final fast OPF": "-",
+                "Final full PF": "-",
+            }
+            
+            pd.options.display.max_columns = None
+            pd.options.display.width = None
+            pd.options.display.max_rows = None
 
-    else:
+            ppoptions = dict(VERBOSE=0,OUT_ALL=0)
+            
+            print("*****************",file=fh)
+            print("*** BASE CASE ***",file=fh)
+            print("*****************\n",file=fh)
+            initial_case = full_acpf(case,**ppoptions)
+            print("STATUS:",initial_case["status"],file=fh)
+            print(f"TIME: {initial_case['time']:.3f} s",file=fh)
+            results[name]["Base case"] = initial_case["status"]
+            print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_case["solution"]).items()],sep="\n",file=fh)
+            if initial_case["ok"]: 
+                print(violations(initial_case["solution"],formatter="table"),file=fh)
+                results[name]["Base case"] = "violations" if violations(initial_case["solution"],formatter="counter") else "ok"
 
-        print("\n***********************************")
-        print("*** DECOUPLED AC OPTIMAL SIZING ***")
-        print("***********************************\n")
-        fast_acosp = decoupled_acosp(case)
-        print("STATUS:",fast_acosp["status"],f"(cost={fast_acosp["value"]})")
-        print(*[f"{x}:\n{y}\n" for x,y in as_frames(fast_acosp["solution"]).items()],sep="\n")
-        print(violations(fast_acosp["solution"]))
-        if not fast_acosp["ok"]:
-            print(internals(fast_acosp))
-        
-        else:
+            print("\n**************************************",file=fh)
+            print("*** DECOUPLED AC OPTIMAL POWERFLOW ***",file=fh)
+            print("**************************************\n",file=fh)
+            fast_acopf = decoupled_acopf(case)
+            print("STATUS:",fast_acopf["status"],file=fh)
+            print(f"TIME: {fast_acopf['time']:.3f} s",file=fh)
+            results[name]["Initial fast OPF"] = fast_acopf["status"]
+            print(*[f"{x}:\n{y}\n" for x,y in as_frames(fast_acopf["solution"]).items()],sep="\n",file=fh)
+            if fast_acopf["ok"]: 
+                print(violations(fast_acopf["solution"],formatter="table"),file=fh)
+                results[name]["Initial fast OPF"] = "violations" if violations(fast_acopf["solution"],formatter="counter") else "ok"
 
-            print("\n**************************")
-            print("*** FINAL AC POWERFLOW ***")
-            print("**************************\n")
-            final_acpf = full_acpf(fast_acosp["solution"],**ppoptions)
-            print("STATUS:",final_acpf["status"])
-            if final_acpf["ok"]:
-                print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_acpf["solution"]).items()],sep="\n")
-            if final_acpf["ok"]: 
-                print(violations(final_acpf["solution"]))
+                print("\n*************************",file=fh)
+                print("*** FULL AC POWERFLOW ***",file=fh)
+                print("*************************\n",file=fh)
+                initial_acpf = full_acpf(fast_acopf["solution"] if fast_acopf["ok"] else case,**ppoptions)
+                print("STATUS:",initial_acpf["status"],file=fh)
+                print(f"TIME: {initial_acpf['time']:.3f} s",file=fh)
+                results[name]["Initial full PF"] = initial_acpf["status"]
+                print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acpf["solution"]).items()],sep="\n",file=fh)
+                if initial_acpf["ok"]: 
+                    print(violations(initial_acpf["solution"],formatter="table"),file=fh)
+                    results[name]["Initial full PF"] = "violations" if violations(initial_acpf["solution"],formatter="counter") else "ok"
 
-            print("\n**********************************")
-            print("*** FINAL AC OPTIMAL POWERFLOW ***")
-            print("**********************************\n")
-            final_acopf = full_acopf(fast_acosp["solution"],**ppoptions)
-            print("STATUS:",final_acopf["status"])
-            if final_acopf["ok"]:
-                print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_acopf["solution"]).items()],sep="\n")
-            if final_acopf["ok"]: 
-                print(violations(final_acopf["solution"]))
+            print("\n***********************************",file=fh)
+            print("*** DECOUPLED AC OPTIMAL SIZING ***",file=fh)
+            print("***********************************\n",file=fh)
+            fast_acosp = decoupled_acosp(case)
+            print("STATUS:",fast_acosp["status"],f"(cost={fast_acosp["value"]})",file=fh)
+            print(f"TIME: {fast_acosp['time']:.3f} s",file=fh)
+            results[name]["Fast OSP"] = fast_acosp["status"]
+            print(*[f"{x}:\n{y}\n" for x,y in as_frames(fast_acosp["solution"]).items()],sep="\n",file=fh)
+            print(violations(fast_acosp["solution"],formatter="table"),file=fh)
+            if not fast_acosp["ok"]:
+                print(internals(fast_acosp),file=fh)
+            
+            else:
 
-            print("\n**************************")
-            print("*** FINAL DECOUPLED OPF ***")
-            print("**************************\n")
-            final_opf = decoupled_acopf(fast_acosp["solution"])
-            print("STATUS:",final_opf["status"])
-            if final_opf["ok"]:
-                print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_opf["solution"]).items()],sep="\n")
-            if final_opf["ok"]: 
-                print(violations(final_opf["solution"]))
+                results[name]["Fast OSP"] = "violations" if violations(fast_acosp["solution"],formatter="counter") else "ok"
+                
+                print("\n**************************",file=fh)
+                print("*** FINAL DECOUPLED OPF ***",file=fh)
+                print("**************************\n",file=fh)
+                final_opf = decoupled_acopf(fast_acosp["solution"])
+                print("STATUS:",final_opf["status"],file=fh)
+                print(f"TIME: {final_opf['time']:.3f} s",file=fh)
+                results[name]["Final fast OPF"] = final_opf["status"]
+                if final_opf["ok"]:
+                    print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_opf["solution"]).items()],sep="\n",file=fh)
+                    results[name]["Final fast OPF"] = "ok"
+                if final_opf["ok"]: 
+                    print(violations(final_opf["solution"],formatter="table"),file=fh)
+                    results[name]["Final fast OPF"] = "violations" if violations(final_opf["solution"],formatter="counter") else "ok"
 
+                print("\n**************************",file=fh)
+                print("*** FINAL AC POWERFLOW ***",file=fh)
+                print("**************************\n",file=fh)
+                final_acpf = full_acpf(fast_acosp["solution"],**ppoptions)
+                print("STATUS:",final_acpf["status"],file=fh)
+                print(f"TIME: {final_acpf['time']:.3f} s",file=fh)
+                results[name]["Final full PF"] = final_acpf["status"]
+                if final_acpf["ok"]:
+                    print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_acpf["solution"]).items()],sep="\n",file=fh)
+                    results[name]["Final full PF"] = "ok"
+                if final_acpf["ok"]: 
+                    print(violations(final_acpf["solution"],formatter="table"),file=fh)
+                    results[name]["Final full PF"] = "violations" if violations(final_acpf["solution"],formatter="counter") else "ok"
+
+        print(f"done in {time()-tic:.1f} s")
+    print(pd.DataFrame(results).T)
