@@ -8,7 +8,7 @@ app = marimo.App(width="medium")
 def _(mo):
     mo.md(r"""
     <center>
-    <font size=5><b>Optimal sizing and placement using softened relaxed optimal powerflow</b></font><br/>
+    <font size=5><b>Optimal capacity expansion using softened relaxed optimal powerflow</b></font><br/>
         David P. Chassin, <i>Eudoxys Sciences LLC</i><br/>
         April 2026
     </center>
@@ -21,11 +21,11 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    This notebook presents a method for solving the problem of locating and sizing real and reactive power resources on an electric network as a relaxation of the optimal power flow problem with softened constraints on loads (i.e., addition of static VAR devices), generation capacities (i.e., generator and substation capacity expansion), and line flows (i.e., transmission line capacity expansion).
+    This notebook presents a method for solving the problem of expanding real and reactive power resources on an electric network as a relaxation of the optimal power flow problem with softened constraints on loads (i.e., addition of static VAR devices), generation capacities (i.e., generator and substation capacity expansion), and line flows (i.e., transmission line capacity expansion).
 
-    The relaxations enable the use of convex optimization solvers as illustrated here using [`cvxpy`](https://www.cvxpy.org/). These are discussed in the first section.  The softening of constraints converts the problem from a classical optimal powerflow problem to an optimal sizing and placement problem, which is discussed in the second section.
+    The relaxations enable the use of convex optimization solvers as illustrated here using [`cvxpy`](https://www.cvxpy.org/). These are discussed in the first section.  The softening of constraints converts the problem from a canonical optimal powerflow problem to an optimal capacity expansion problem, which is discussed in the second section.
 
-    The method does not support adding generators to PQ busses nor does it support adding new transmission lines or transformers where none are already present.
+    The method does not support adding generators to PQ busses nor does it support adding new transmission lines or transformers where none are already present as one might find in an optimal sizing and placement problem.
     """)
     return
 
@@ -45,9 +45,9 @@ def _(mo):
 
     From a computational perspective, insufficient generation resources, reactive power support, or transmission capacity is often discernable by an infeasible optimal powerflow problem (OPF). A convex relaxation of the OPF problem is presented in the first section entitle "Optimal Powerflow" and illustrated with a simple 4-bus case that is infeasible.
 
-    The infeasibility of most OPF problems can usually be remedied by load curtailment. However for certain studies it is preferable to upgrade the network's load-carrying capacity so that OPF problem becomes feasible without resorting to load curtailment. Network capacity expansion in this context can be thought of as a subset of the larger infrastructure planning problem and expressed as an OPF problem where the constraints on generation and powerline resources are softened using variables describing the generation, static VAr devices, and powerline upgrades necessary to make OPF feasible at a minimum cost. This softening of the OPF problem is presented in the second section entitled "Optimal Sizing and Placement".
+    The infeasibility of most OPF problems can usually be remedied by load curtailment. However for certain studies it is preferable to upgrade the network's load-carrying capacity so that the OPF problem becomes feasible without resorting to load curtailment. Network capacity expansion in this context can be thought of as a subset of the larger infrastructure planning problem and expressed as an OPF problem where the constraints on generation and powerline resources are softened using variables describing the generation, static VAr devices, and powerline upgrades necessary to make OPF feasible at a minimum cost. This softening of the OPF problem is presented in the second section entitled "Optimal Capacity Expansion".
 
-    In the third section entitled "WECC 240 Study", the optimal sizing and placement (OSP) problem is applied to a 243-bus model of the western interconnection in North America.
+    In the third section entitled "WECC 240 Study", the optimal capacity expansion (OCE) problem is applied to a 243-bus model of the western interconnection in North America.
     """)
     return
 
@@ -186,11 +186,26 @@ def _(mo):
 
 
 @app.cell
-def _(show_data, solvers):
-    name = "case4r"
+def _(solvers):
+    name,line_order = (
+        ("case4r",[0,2,1,3,4]),
+        ("case9m",[3,0,1,2,4,5,6,7,8]),
+    )[1] # pick one
     case = solvers.load(name)
-    show_data(case,"Table 1(a): Base case data")
-    return case, name
+    return case, line_order, name
+
+
+@app.cell
+def _(case, show_data, solvers):
+    base_solution = solvers.full_acpf(case,VERBOSE=0,OUT_ALL=0)
+    show_data(base_solution["solution"],"Table 1: Base case data")
+    return (base_solution,)
+
+
+@app.cell
+def _(case, line_order, mo, solvers):
+    mo.mermaid(solvers.as_mermaid(case,line_order=line_order))
+    return
 
 
 @app.cell(hide_code=True)
@@ -218,9 +233,9 @@ def _(mo):
 
 
 @app.cell
-def _(case, show_violations):
+def _(base_solution, show_violations):
     # assert not solvers.violations(case,), "base case has unexpected violations"
-    show_violations(case,caption="Table 1(b): Base case violations")
+    show_violations(base_solution,caption="Table 2: Base case violations")
     return
 
 
@@ -255,15 +270,29 @@ def _(initial_powerflow, mo):
 
 
 @app.cell
-def _(initial_powerflow, show_data):
+def _(initial_powerflow, line_order, mo, name, solvers):
+    mo.vstack([mo.mermaid(solvers.as_mermaid(initial_powerflow["solution"],line_order=line_order)),
+               mo.md(f"Figure 1: Network diagram of `{name}` as solved by `pypower`")
+              ])
+    return
+
+
+@app.cell
+def _(initial_powerflow, name, show_data):
     # mo.accordion(solvers.as_frames(initial_powerflow["solution"],True))
-    show_data(initial_powerflow["solution"],caption="Table 2(a): Initial full AC powerflow solution")
+    show_data(
+        initial_powerflow["solution"],
+        caption=f"Table 2(a): Initial full AC powerflow solution of `{name}`",
+    )
     return
 
 
 @app.cell(hide_code=True)
-def _(initial_powerflow, show_violations):
-    show_violations(initial_powerflow["solution"],caption="Table 2(b): Initial full AC powerflow violations")
+def _(initial_powerflow, name, show_violations):
+    show_violations(
+        initial_powerflow["solution"],
+        caption=f"Table 2(b): Constraint violations after full AC powerflow solution of `{name}`",
+    )
     return
 
 
@@ -284,8 +313,15 @@ def _(case, solvers):
 @app.cell
 def _(initial_opf, mo):
     mo.md(rf"""
-    The full AC OPF in `pypower` finds no solution that satisfies Feasible Set 3 and `pypower`'s solver reports that it "{initial_opf["status"].lower()}" as presented in the base case.
+    The full AC OPF in `pypower` reports that it "{initial_opf["status"].lower()}" as presented in the base case, and the solution's constraint violations are shown in Table 3. 
     """)
+    return
+
+
+@app.cell
+def _(initial_opf, show_violations):
+    # mo.mermaid(solvers.as_mermaid(initial_opf["solution"],line_order=line_order))
+    show_violations(initial_opf["solution"],caption="Table 3: Constraint violations after solving the full AC optimal powerflow with `pypower`.")
     return
 
 
@@ -309,6 +345,12 @@ def _(decoupled_opf, mo):
     mo.md(rf"""
     The decoupled optimal powerflow problem must also satisfy Feasible Set 4 and the solver reports that it is {decoupled_opf["status"].lower()} as presented in the base case.
     """)
+    return
+
+
+@app.cell
+def _(decoupled_opf, line_order, mo, solvers):
+    mo.mermaid(solvers.as_mermaid(decoupled_opf["solution"],line_order=line_order))
     return
 
 
