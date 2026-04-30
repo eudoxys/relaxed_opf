@@ -3,7 +3,7 @@
 import os
 from copy import deepcopy as copy
 import importlib
-import warnings
+from warnings import warn
 from time import time
 
 import numpy as np
@@ -43,7 +43,7 @@ def full_acpf(case:dict,**kwargs) -> dict:
     """Solve full AC powerflow"""
     tic = time()
     try:
-        result,ok = runpf(case,ppoption(**kwargs))
+        result,ok = runpf(copy(case),ppoption(**kwargs))
         if ok:
             solution = {x:y for x,y in result.items() if x in case}
             ref = [n for n, bt in enumerate(result["bus"][:, bus.BUS_TYPE]) if bt == 3]
@@ -80,7 +80,7 @@ def full_acopf(case:dict,**kwargs) -> dict:
     """Solve full AC optimal powerflow"""
     tic = time()
     try:
-        result = runopf(case,ppoption(**kwargs))
+        result = runopf(copy(case),ppoption(**kwargs))
         if result["success"]:
             solution = {x:y for x,y in result.items() if x in case}
             result = {
@@ -162,6 +162,12 @@ def decoupled_acopf(
     if "canon_backend" not in options:
         options["canon_backend"] = "SCIPY"
 
+    # model check
+    assert "baseMVA" in data, "missing baseMVA value"
+    assert "bus" in data, "missing bus array"
+    assert "branch" in data, "missing branch array"
+    assert "gen" in data, "missing gen array"
+
     # dimensions
     N = len(data["bus"])
     M = len(data["branch"])
@@ -171,33 +177,40 @@ def decoupled_acopf(
     puS = data["baseMVA"]
 
     # bus parameters
-    bb = data["bus"]
+    bb = np.array(data["bus"])
     vl = cp.Constant(value=bb[:, [bus.VMIN]], name="vl") # voltage lower limit
     vu = cp.Constant(value=bb[:, [bus.VMAX]], name="vu") # voltage upper limit
     pd = cp.Parameter(shape=(N,1), value=bb[:, [bus.PD]] / puS, name="pd") # load real power
     qd = cp.Parameter(shape=(N,1), value=bb[:, [bus.QD]] / puS, name="qd") # load reactive power
+    bi = {i: n for n, i in enumerate(bb[:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
 
     # branch parameters
     br = data["branch"] # branch data
-    bi = {i: n for n, i in enumerate(bb[:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
     f_bus = [bi[x] for x in br[:,branch.F_BUS]]
     t_bus = [bi[x] for x in br[:,branch.T_BUS]]
-    tap = br[:,branch.TAP]
-    tap[np.where(tap==0)] = 1.0
-    shift = br[:,branch.SHIFT] * np.pi / 180
-    br_status = br[:,branch.BR_STATUS]
-    br_x = br[:,branch.BR_X]
-    b = sp.sparse.coo_matrix((br_status/br_x/tap,(range(M),f_bus)),shape=(M,N)) \
-        - sp.sparse.coo_matrix((br_status/br_x/tap+shift,(range(M),t_bus)),shape=(M,N)) 
+    tap = br[:,[branch.TAP]]
+    tap[np.where(tap==0)] = 1.0 # non-zero is only for transformers, zero is powerline (unity tap)
+    err = np.where(tap<0)[0]
+    assert len(err) == 0, f"bus[{err},TAP] < 0"
+    shift = br[:,[branch.SHIFT]] * np.pi / 180
+    br_status = br[:,[branch.BR_STATUS]]
+    br_x = br[:,[branch.BR_X]]
+    err = np.where([x for x in br_status.flatten() if x not in [0,1]])[0]
+    assert len(err)==0, f"bus[{err},BR_STATUS] value is not in [0,1]"
+    err = np.where(br_x==0)[0]
+    assert len(err) == 0, f"bus[{err},BR_X] <= 0"
+    x = br_status/br_x/tap
+    b = sp.sparse.coo_matrix((x.flatten(),(range(M),f_bus)),shape=(M,N)) \
+        - sp.sparse.coo_matrix(((x+shift).flatten(),(range(M),t_bus)),shape=(M,N)) 
     b = cp.Constant(value=b, name="b") # line susceptances
-    f = sp.sparse.coo_matrix((br_status,(range(M),f_bus)),shape=(M,N)).T \
-        - sp.sparse.coo_matrix((br_status,(range(M),t_bus)),shape=(M,N)).T 
+    f = sp.sparse.coo_matrix((br_status.flatten(),(range(M),f_bus)),shape=(M,N)).T \
+        - sp.sparse.coo_matrix((br_status.flatten(),(range(M),t_bus)),shape=(M,N)).T 
     f = cp.Constant(value=f, name="f") # line connections
     s = br[:,[branch.RATE_A]]/puS
     s = cp.Parameter(shape=(M,1),value=s,name="s") # line flow limits
 
     # gen parameters
-    gg = data["gen"]
+    gg = np.array(data["gen"])
     gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
     vg = cp.Constant(value=gg[:,[gen.VG]], name="vg") # bus voltage setpoints
     pl = cp.Constant(value=gg[:,[gen.PMIN]], name="pl") # real power minimum
@@ -217,14 +230,51 @@ def decoupled_acopf(
         pc = cp.Variable(shape=(N,1), name="pc", nonneg=True) # real power demand curtailment
         qc = cp.Variable(shape=(N,1), name="qc") # reactive power demand curtailment
 
+    # sanity checks
+    warnings = []
+
+    # bus vl/vu range
+    if min(vu.value - vl.value) < 0 or min(vl.value) < 0.8 or max(vu.value) > 1.2:
+        for n in np.where((vu.value - vl.value) < 0 )[0]:
+            warnings.append(f"bus[{n},VMAX] < bus[{n},VMIN]")
+        for n in np.where(vl.value < 0.8)[0]:
+            warnings.append(f"bus[{n},VMIN] < 0.8")
+        for n in np.where(vu.value > 1.2)[0]:
+            warnings.append(f"bus[{n},VMAX] > 1.2")
+
+    # line ratings
+    if min(s.value) < 0:
+        for n in np.where(s.value < 0)[0]:
+            warnings.append(f"line[{n},RATE_A] < 0")
+
+    # gen pl/pu range
+    if min(pu.value - pl.value) < 0 or min(pu.value) < 0 or min(pl.value) < 0 :
+        for n in np.where((pu.value - pl.value) < 0)[0]:
+            warnings.append(f"gen[{n},PMAX] < gen[{n},PMIN]")
+        for n in np.where(pl.value < 0)[0]:
+            warnings.append(f"gen[{n},PMIN] < 0")
+        for n in np.where(pu.value < 0)[0]:
+            warnings.append(f"gen[{n},PMAX] < 0")
+
+    # gen vg range
+    if min(vg.value) < 0.8 or max(vg.value) > 1.2:
+        for n in np.where(vg.value < 0.8)[0]:
+            warnings.append(f"gen[{n}].vg < 0.8")
+        for n in np.where(vg.value > 1.2)[0]:
+            warnings.append(f"gen[{n}].vg > 1.2")
+
+    # warn of check failures
+    if warnings:
+        warn(f"{len(warnings)} model warnings (see 'warnings' for details)")
+
     # reference busses
     ref = [n for n, bt in enumerate(data["bus"][:, bus.BUS_TYPE]) if bt == 3]
 
     # cost function
     cost = 0
     # cost = cp.sum(pg**2+qg**2) # TODO: replace with generation costs from gencost
-    # if curtailment:
-    #     cost += curtailment * cp.sum ( pc**2 + qc**2 ) # curtailment cost
+    if curtailment:
+        cost += curtailment * cp.sum ( pc**2 + qc**2 ) # curtailment cost
 
     # constraints
     constraints = [
@@ -237,6 +287,8 @@ def decoupled_acopf(
         pl <= pg, pg <= pu, # Equation (3a)
         ql <= qg, qg <= qu, # Equation (3b)
         cp.abs(pf) <= s, # Equation (4a)
+        cp.abs(qf) <= s,
+        cp.abs(pf) + cp.abs(qf) <= 1.4 * s,
         vl <= vm, vm <= vu, # Equation (5a)
 
         # practical constraints not specified in the mathematical model
@@ -291,7 +343,7 @@ def decoupled_acopf(
             "vg (pu.kV)": vg.value.T[0],
         },
         "solution": {},
-        "warnings": [],
+        "warnings": warnings,
         "violations": {},
     }
     if problem.status == "optimal":
@@ -416,6 +468,12 @@ def decoupled_acosp(
             if key not in costs:
                 costs[key] = value
 
+    # model check
+    assert "baseMVA" in data, "missing baseMVA value"
+    assert "bus" in data, "missing bus array"
+    assert "branch" in data, "missing branch array"
+    assert "gen" in data, "missing gen array"
+
     # dimensions
     N = len(data["bus"])
     M = len(data["branch"])
@@ -426,29 +484,44 @@ def decoupled_acosp(
 
    # bus parameters
     bb = data["bus"]
-    # vl = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMIN]], name="vl", nonneg=True) # voltage lower limit
-    # vu = cp.Parameter(shape=(N,1), value=bb[:, [bus.VMAX]], name="vu", nonneg=True) # voltage upper limit
     vl = cp.Constant(value=bb[:, [bus.VMIN]], name="vl") # voltage lower limit
     vu = cp.Constant(value=bb[:, [bus.VMAX]], name="vu") # voltage upper limit
     pd = cp.Parameter(shape=(N,1), value=bb[:, [bus.PD]]/puS, name="pd") # load real power
     qd = cp.Parameter(shape=(N,1), value=bb[:, [bus.QD]]/puS, name="qd") # load reactive power
+    bi = {i: n for n, i in enumerate(bb[:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
 
     # branch parameters
     br = data["branch"] # branch data
-    bi = {i: n for n, i in enumerate(bb[:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
+
     f_bus = [bi[x] for x in br[:,branch.F_BUS]]
     t_bus = [bi[x] for x in br[:,branch.T_BUS]]
-    tap = br[:,branch.TAP]
-    tap[np.where(tap==0)] = 1.0
-    shift = br[:,branch.SHIFT] * np.pi / 180
-    br_status = np.ones(M) if allin else br[:,branch.BR_STATUS] 
-    br_x = br[:,branch.BR_X]
-    b = sp.sparse.coo_matrix((br_status/br_x/tap,(range(M),f_bus)),shape=(M,N)) \
-        - sp.sparse.coo_matrix((br_status/br_x/tap+shift,(range(M),t_bus)),shape=(M,N))
+
+    tap = br[:,[branch.TAP]].flatten()
+    tap[np.where(tap==0)] = 1.0 # non-zero is only for transformers, zero is powerline (unity tap)
+    err = np.where(tap<0)[0]
+    assert len(err) == 0, f"bus[{err},TAP] < 0"
+
+    shift = br[:,[branch.SHIFT]].flatten() * np.pi / 180
+
+    br_status = br[:,[branch.BR_STATUS]].flatten()
+    if allin:
+        br_status[br_status==0] = 1
+    err = np.where([x for x in br_status if x not in [0,1]])[0]
+    assert len(err)==0, f"bus[{err},BR_STATUS] value is not in [0,1]"
+
+    br_x = br[:,[branch.BR_X]].flatten()
+    err = np.where(br_x==0)[0]
+    assert len(err) == 0, f"bus[{err},BR_X] <= 0"
+
+    x = br_status/br_x/tap
+    b = sp.sparse.coo_matrix((x,(range(M),f_bus)),shape=(M,N)) \
+        - sp.sparse.coo_matrix(((x+shift),(range(M),t_bus)),shape=(M,N)) 
+    b = cp.Constant(value=b, name="b") # line susceptances
+
     f = sp.sparse.coo_matrix((br_status,(range(M),f_bus)),shape=(M,N)).T \
         - sp.sparse.coo_matrix((br_status,(range(M),t_bus)),shape=(M,N)).T 
-    b = cp.Constant(value=b, name="b") # line susceptances
     f = cp.Constant(value=f, name="f") # line connections
+
     s = br[:,[branch.RATE_A]]/puS
     s = cp.Parameter(shape=(M,1),value=s,name="s") # line flow limits
 
@@ -478,6 +551,43 @@ def decoupled_acosp(
     aq = cp.Variable(shape=(K,1), name="aq", nonneg=True) # generator reactive power additions
     al = cp.Variable(shape=(M,1), name="al", nonneg=True) # powerline/transformer capacity additions
 
+    # sanity checks
+    warnings = []
+
+    # bus vl/vu range
+    if min(vu.value - vl.value) < 0 or min(vl.value) < 0.8 or max(vu.value) > 1.2:
+        for n in np.where((vu.value - vl.value) < 0 )[0]:
+            warnings.append(f"bus[{n},VMAX] < bus[{n},VMIN]")
+        for n in np.where(vl.value < 0.8)[0]:
+            warnings.append(f"bus[{n},VMIN] < 0.8")
+        for n in np.where(vu.value > 1.2)[0]:
+            warnings.append(f"bus[{n},VMAX] > 1.2")
+
+    # line ratings
+    if min(s.value) < 0:
+        for n in np.where(s.value < 0)[0]:
+            warnings.append(f"line[{n},RATE_A] < 0")
+
+    # gen pl/pu range
+    if min(pu.value - pl.value) < 0 or min(pu.value) < 0 or min(pl.value) < 0 :
+        for n in np.where((pu.value - pl.value) < 0)[0]:
+            warnings.append(f"gen[{n},PMAX] < gen[{n},PMIN]")
+        for n in np.where(pl.value < 0)[0]:
+            warnings.append(f"gen[{n},PMIN] < 0")
+        for n in np.where(pu.value < 0)[0]:
+            warnings.append(f"gen[{n},PMAX] < 0")
+
+    # gen vg range
+    if min(vg.value) < 0.8 or max(vg.value) > 1.2:
+        for n in np.where(vg.value < 0.8)[0]:
+            warnings.append(f"gen[{n}].vg < 0.8")
+        for n in np.where(vg.value > 1.2)[0]:
+            warnings.append(f"gen[{n}].vg > 1.2")
+
+    # warn of check failures
+    if warnings:
+        warn(f"{len(warnings)} model warnings (see 'warnings' for details)")
+
     # setup Feasible Sets
     ref = [n for n, x in enumerate(data["bus"][:, bus.BUS_TYPE]) if x == 3] # reference bus(ses)
     nongen = list(set(range(N)) - set(gi)) # non-generation busses
@@ -505,9 +615,9 @@ def decoupled_acosp(
         # Feasible Set 4
         pl <= pg, pg <= pu + ap, # Equation (3c)
         ql - aq <= qg, qg <= qu + aq, # Equation (3d)
-        cp.abs(pf) <= s + al, # Equation (4b) real power flow approximation
-        cp.abs(qf) <= s + al, # Equation (4b) for reactive power flow approximation
-        cp.abs(pf) + cp.abs(qf) <= s + al, # Equation (4b) total power flow approximation
+        cp.abs(pf) <= s + al, # Equation (4b)
+        cp.abs(qf) <= s + al, 
+        cp.abs(pf) + cp.abs(qf) <= 1.4 * ( s + al ),
         vl <= vm, vm <= vu, # Equation (5b)
 
         # practical constraints not specified in the mathematical model
@@ -519,8 +629,8 @@ def decoupled_acosp(
         ac[gi] == 0, # no capacitors/condensors at generation busses
         
         # limits on reactive power additions relative to real power additions
-        # ql - aq >= - ( pg + ap ), qu + aq <= pg + ap, # lower and upper bounds on generation additions
-        qu + aq <= pu + ap,
+        cp.abs(qu) + aq <= pu + ap,
+        cp.abs(ql) + aq <= pu + ap,
     ]
 
     # problem statement
@@ -586,11 +696,12 @@ def decoupled_acosp(
             solution["branch"][:,branch.BR_STATUS] = np.ones(M)
         solution["branch"][:,[branch.PF]] = pf.value * puS
         solution["branch"][:,[branch.QF]] = qf.value * puS
-        ratio = 2 * al.value * puS/solution["branch"][:,[branch.RATE_A]] + 1
-        columns = [branch.RATE_A,branch.RATE_B,branch.RATE_C] # raised values
-        solution["branch"][:,columns] = solution["branch"][:,columns] * ratio
-        columns = [branch.BR_R,branch.BR_X,branch.BR_B] # lowered values
-        solution["branch"][:,columns] = solution["branch"][:,columns] / ratio
+        rows = np.where((solution["branch"][:,[branch.RATE_A]]>0) & (al.value>0) )[0]
+        ratio = 2 * al.value.flatten()[rows] * puS / solution["branch"][rows,branch.RATE_A].flatten() + 1
+        for column in [branch.RATE_A,branch.RATE_B,branch.RATE_C]: # raised values
+            solution["branch"][rows,column] = solution["branch"][rows,column] * ratio
+        for column in [branch.BR_R,branch.BR_X,branch.BR_B]: # lowered values
+            solution["branch"][rows,column] = solution["branch"][rows,column] / ratio
         
         # generator updates
         if allin:
@@ -607,16 +718,16 @@ def decoupled_acosp(
         updates = []
         for n,x in enumerate([x for x in ap.value[:,0]*puS]):
              if abs(x) > 1e-3:
-                updates.append(f"add {x:.3f} MW gen {n}")
+                updates.append(f"add {x:.3f} MW gen[{n},PMAX]")
         for n,x in enumerate([x for x in aq.value[:,0]*puS]):
              if abs(x) > 1e-3:
-                updates.append(f"add {x:.3f} MVAr gen {n}")
+                updates.append(f"add {x:.3f} MVAr gen[{n},QMAX]")
         for n,x in enumerate([x for x in ac.value[:,0]*puS]):
              if abs(x) > 1e-3:
-                updates.append(f"add {x:.3f} MVAr to bus {n}")
+                updates.append(f"add {x:.3f} MVAr to bus[{n},BS]")
         for n,x in enumerate([x for x in al.value[:,0]*puS]):
              if abs(x) > 1e-3:
-                updates.append(f"add {x:.3f} MVA to line {n}")
+                updates.append(f"add {x:.3f} MVA to branch[{n},RATE_A]")
         result["updates"] = updates
 
         # create violations list
@@ -723,7 +834,7 @@ def as_table(violations):
         result.append(key + "  "*(colwidth[0]-len(key)) + " " + value)
     return "\n".join(result)
 
-def internals(case):
+def internals(case,all=False):
     """Generate solver internals in a readable format"""
     def dump(x):
         if isinstance(x,dict):
@@ -731,7 +842,7 @@ def internals(case):
         else:
             return str(x).replace("\n","  \n")
 
-    keys = ["problem","constants","parameters","variables","warnings"]
+    keys = case.keys() if all else ["problem","constants","parameters","variables","warnings"]
     return "\n".join([f"\n{x}\n{'-'*len(x)}\n\n  {dump(y)}" for x,y in case.items() if x in keys])
 
 def as_mermaid(case,bus_order=None,line_order=None):
