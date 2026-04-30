@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Python: module solvers</title>
+</head><body>
+
+<table class="heading">
+<tr class="heading-text decor">
+<td class="title">&nbsp;<br><strong class="title">solvers</strong></td>
+<td class="extra"><a href=".">index</a><br><a href="file:/Users/david/GitHub/eudoxys/relaxed_opf/solvers.py">/Users/david/GitHub/eudoxys/relaxed_opf/solvers.py</a></td></tr></table>
+    <p><span class="code">Powerflow&nbsp;solvers</span></p>
+<p>
+<table class="section">
+<tr class="decor pkg-content-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Modules</strong></td></tr>
+    
+<tr><td class="decor pkg-content-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><table><tr><td class="multicolumn"><a href="pypower.idx_brch.html">pypower.idx_brch</a><br>
+<a href="pypower.idx_bus.html">pypower.idx_bus</a><br>
+<a href="pypower.idx_cost.html">pypower.idx_cost</a><br>
+</td><td class="multicolumn"><a href="cvxpy.html">cvxpy</a><br>
+<a href="pypower.idx_gen.html">pypower.idx_gen</a><br>
+<a href="pypower.idx_dcline.html">pypower.idx_dcline</a><br>
+</td><td class="multicolumn"><a href="importlib.html">importlib</a><br>
+<a href="numpy.html">numpy</a><br>
+<a href="os.html">os</a><br>
+</td><td class="multicolumn"><a href="pandas.html">pandas</a><br>
+<a href="scipy.html">scipy</a><br>
+</td></tr></table></td></tr></table><p>
+<table class="section">
+<tr class="decor functions-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Functions</strong></td></tr>
+    
+<tr><td class="decor functions-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><dl><dt><a name="-as_frames"><strong>as_frames</strong></a>(data: dict, showall: bool = False, precision: int = 3, **kwargs) -&gt; dict</dt><dd><span class="code">Return&nbsp;case&nbsp;data&nbsp;as&nbsp;dataframes<br>
+&nbsp;<br>
+Arguments<br>
+---------<br>
+&nbsp;<br>
+-&nbsp;`data`:&nbsp;case&nbsp;data<br>
+&nbsp;<br>
+-&nbsp;`showall`:&nbsp;show&nbsp;all&nbsp;data&nbsp;instead&nbsp;of&nbsp;solver-related&nbsp;data&nbsp;only<br>
+&nbsp;<br>
+-&nbsp;`precision`:&nbsp;data&nbsp;rounding&nbsp;before&nbsp;loading&nbsp;into&nbsp;frames<br>
+&nbsp;<br>
+Returns<br>
+-------<br>
+&nbsp;<br>
+-&nbsp;`dict`:&nbsp;data&nbsp;frames&nbsp;of&nbsp;case&nbsp;data</span></dd></dl>
+ <dl><dt><a name="-as_mdtable"><strong>as_mdtable</strong></a>(violations: dict)</dt><dd><span class="code">Format&nbsp;violation&nbsp;results&nbsp;as&nbsp;a&nbsp;markdown&nbsp;table<br>
+&nbsp;<br>
+Arguments<br>
+---------<br>
+&nbsp;<br>
+-&nbsp;`violations`:&nbsp;dict&nbsp;of&nbsp;violations&nbsp;found&nbsp;(see&nbsp;`violations`)</span></dd></dl>
+ <dl><dt><a name="-as_mermaid"><strong>as_mermaid</strong></a>(case, bus_order=None, line_order=None)</dt><dd><span class="code">Generate&nbsp;Mermaid&nbsp;network&nbsp;diagram<br>
+&nbsp;<br>
+Arguments<br>
+---------<br>
+&nbsp;<br>
+-&nbsp;`bus_order`:&nbsp;change&nbsp;the&nbsp;ordering&nbsp;of&nbsp;the&nbsp;busses&nbsp;to&nbsp;avoid&nbsp;crossovers<br>
+&nbsp;<br>
+-&nbsp;`line_order`:&nbsp;change&nbsp;the&nbsp;ordering&nbsp;of&nbsp;the&nbsp;lines&nbsp;to&nbsp;avoid&nbsp;crossovers</span></dd></dl>
+ <dl><dt><a name="-as_table"><strong>as_table</strong></a>(violations: dict)</dt><dd><span class="code">Format&nbsp;violation&nbsp;results&nbsp;as&nbsp;a&nbsp;table<br>
+&nbsp;<br>
+Arguments<br>
+---------<br>
+&nbsp;<br>
+-&nbsp;`violations`:&nbsp;dict&nbsp;of&nbsp;violations&nbsp;found&nbsp;(see&nbsp;`violations`)</span></dd></dl>
+ <dl><dt><a name="-decoupled_acopf"><strong>decoupled_acopf</strong></a>(
+    data: dict,
+    curtailment: float = None,
+    setpoints: float | bool | None = None,
+    smallangles: float | None = None,
+    **options
+) -&gt; dict</dt><dd><span class="code">Solve&nbsp;decoupled&nbsp;optimal&nbsp;powerflow&nbsp;problem<br>
+&nbsp;<br>
+Arguments<br>
+---------<br>
+&nbsp;<br>
+-&nbsp;`data`:&nbsp;`pypower`&nbsp;case&nbsp;data<br>
+&nbsp;<br>
+-&nbsp;`curtailment`:&nbsp;cost&nbsp;of&nbsp;curtailment&nbsp;per-unit&nbsp;generation&nbsp;cost<br>
+&nbsp;&nbsp;(None&nbsp;disables&nbsp;curtailment)<br>
+&nbsp;<br>
+-&nbsp;`setpoints`:&nbsp;constrain&nbsp;to&nbsp;voltages&nbsp;to&nbsp;gen.VG&nbsp;or&nbsp;set&nbsp;ref&nbsp;voltage(s)<br>
+&nbsp;<br>
+-&nbsp;`**options`:&nbsp;`cvxpy`&nbsp;solver&nbsp;options<br>
+&nbsp;<br>
+Returns<br>
+-------<br>
+&nbsp;<br>
+-&nbsp;`dict`:&nbsp;solution&nbsp;results&nbsp;include&nbsp;the&nbsp;following:<br>
+&nbsp;<br>
+&nbsp;&nbsp;-&nbsp;`case`:&nbsp;a&nbsp;copy&nbsp;of&nbsp;the&nbsp;original&nbsp;problem&nbsp;data&nbsp;(see&nbsp;`pypower.casedata`)<br>
+&nbsp;&nbsp;-&nbsp;`status`:&nbsp;status&nbsp;of&nbsp;the&nbsp;solution&nbsp;(see&nbsp;`cvxpy.Solve`)<br>
+&nbsp;&nbsp;-&nbsp;`value`:&nbsp;value&nbsp;of&nbsp;the&nbsp;objection&nbsp;function&nbsp;(see&nbsp;`cvxpy.Solve`)<br>
+&nbsp;&nbsp;-&nbsp;`objective`:&nbsp;objective&nbsp;function<br>
+&nbsp;&nbsp;-&nbsp;`constraints`:&nbsp;constraints&nbsp;list<br>
+&nbsp;&nbsp;-&nbsp;`problem`:&nbsp;cvxpy&nbsp;problem&nbsp;data&nbsp;(see&nbsp;`cvxpy.Problem`)<br>
+&nbsp;&nbsp;-&nbsp;`solution`:&nbsp;solved&nbsp;case&nbsp;data&nbsp;(see&nbsp;`pypower.casedata`)<br>
+&nbsp;&nbsp;-&nbsp;`parameters`:&nbsp;problem&nbsp;parameters&nbsp;(dict)<br>
+&nbsp;&nbsp;-&nbsp;`variables`:&nbsp;problem&nbsp;variables&nbsp;(dict)<br>
+&nbsp;&nbsp;-&nbsp;`ok`:&nbsp;valid&nbsp;solution&nbsp;obtained&nbsp;flag&nbsp;(boolean)<br>
+&nbsp;<br>
+&nbsp;&nbsp;In&nbsp;addition&nbsp;the&nbsp;following&nbsp;are&nbsp;included&nbsp;is&nbsp;the&nbsp;problem&nbsp;is&nbsp;feasible:<br>
+&nbsp;&nbsp;<br>
+&nbsp;&nbsp;-&nbsp;`pf`:&nbsp;real&nbsp;power&nbsp;flow&nbsp;on&nbsp;branches<br>
+&nbsp;&nbsp;-&nbsp;`qf`:&nbsp;reactive&nbsp;power&nbsp;flow&nbsp;on&nbsp;branches<br>
+&nbsp;&nbsp;-&nbsp;`vm`:&nbsp;bus&nbsp;voltage&nbsp;magnitudes<br>
+&nbsp;&nbsp;-&nbsp;`va`:&nbsp;bus&nbsp;voltage&nbsp;angles<br>
+&nbsp;&nbsp;-&nbsp;`pg`:&nbsp;real&nbsp;power&nbsp;generation&nbsp;dispatch<br>
+&nbsp;&nbsp;-&nbsp;`qg`:&nbsp;reactive&nbsp;power&nbsp;generation&nbsp;dispatch<br>
+&nbsp;&nbsp;-&nbsp;`pc`:&nbsp;real&nbsp;power&nbsp;curtailment&nbsp;(if&nbsp;any)<br>
+&nbsp;&nbsp;-&nbsp;`qc`:&nbsp;reactive&nbsp;power&nbsp;curtailment&nbsp;(if&nbsp;any)</span></dd></dl>
+ <dl><dt><a name="-decoupled_acosp"><strong>decoupled_acosp</strong></a>(
+    data: dict,
+    costs: dict[str, float] = None,
+    margin: float = 0.15,
+    allin: bool = True,
+    setpoints: float | bool | None = None,
+    smallangles: float | None = None,
+    **options
+) -&gt; dict</dt><dd><span class="code">Solve&nbsp;decoupled&nbsp;optimal&nbsp;sizing/placement&nbsp;problem<br>
+&nbsp;<br>
+Arguments<br>
+---------<br>
+&nbsp;<br>
+-&nbsp;`data`:&nbsp;`pypower`&nbsp;case&nbsp;data<br>
+&nbsp;<br>
+-&nbsp;`costs`:&nbsp;capacity&nbsp;addition&nbsp;costs&nbsp;(per-unit&nbsp;generation&nbsp;cost)<br>
+&nbsp;&nbsp;Valid&nbsp;costs&nbsp;are<br>
+&nbsp;&nbsp;-&nbsp;`"capacitor"`:&nbsp;cost&nbsp;of&nbsp;adding&nbsp;a&nbsp;capacitor&nbsp;(default&nbsp;is&nbsp;0.1)<br>
+&nbsp;&nbsp;-&nbsp;`"condensor"`:&nbsp;cost&nbsp;of&nbsp;adding&nbsp;a&nbsp;condensor&nbsp;(default&nbsp;is&nbsp;1.0)<br>
+&nbsp;&nbsp;-&nbsp;`"transformer"`:&nbsp;cost&nbsp;of&nbsp;increasing&nbsp;transformer&nbsp;capacity&nbsp;(default&nbsp;is&nbsp;2.0)<br>
+&nbsp;&nbsp;-&nbsp;`"powerline"`:&nbsp;cost&nbsp;of&nbsp;increasing&nbsp;powerline&nbsp;capacity&nbsp;(default&nbsp;is&nbsp;10.0)<br>
+&nbsp;<br>
+-&nbsp;`margin`:&nbsp;load&nbsp;margin&nbsp;for&nbsp;sizing<br>
+&nbsp;<br>
+-&nbsp;`allin`:&nbsp;enable&nbsp;use&nbsp;of&nbsp;all&nbsp;available&nbsp;resources<br>
+&nbsp;<br>
+-&nbsp;`setpoints`:&nbsp;set&nbsp;voltage&nbsp;setpoints&nbsp;on&nbsp;generation&nbsp;busses<br>
+&nbsp;<br>
+-&nbsp;`smallangles`:&nbsp;restrict&nbsp;voltage&nbsp;angles&nbsp;to&nbsp;near&nbsp;zero<br>
+&nbsp;<br>
+-&nbsp;`**options`:&nbsp;`cvxpy`&nbsp;solver&nbsp;options<br>
+&nbsp;<br>
+Returns<br>
+-------<br>
+&nbsp;<br>
+-&nbsp;`dict`:&nbsp;solution&nbsp;results&nbsp;include&nbsp;the&nbsp;following:<br>
+&nbsp;<br>
+&nbsp;&nbsp;-&nbsp;`case`:&nbsp;a&nbsp;copy&nbsp;of&nbsp;the&nbsp;original&nbsp;problem&nbsp;data&nbsp;(see&nbsp;`pypower.casedata`)<br>
+&nbsp;&nbsp;-&nbsp;`status`:&nbsp;status&nbsp;of&nbsp;the&nbsp;solution&nbsp;(see&nbsp;`cvxpy.Solve`)<br>
+&nbsp;&nbsp;-&nbsp;`value`:&nbsp;value&nbsp;of&nbsp;the&nbsp;objection&nbsp;function&nbsp;(see&nbsp;`cvxpy.Solve`)<br>
+&nbsp;&nbsp;-&nbsp;`objective`:&nbsp;objective&nbsp;function<br>
+&nbsp;&nbsp;-&nbsp;`constraints`:&nbsp;constraints&nbsp;list<br>
+&nbsp;&nbsp;-&nbsp;`problem`:&nbsp;cvxpy&nbsp;problem&nbsp;data&nbsp;(see&nbsp;`cvxpy.Problem`)<br>
+&nbsp;&nbsp;-&nbsp;`solution`:&nbsp;solved&nbsp;case&nbsp;data&nbsp;(see&nbsp;`pypower.casedata`)<br>
+&nbsp;&nbsp;-&nbsp;`parameters`:&nbsp;problem&nbsp;parameters&nbsp;(dict)<br>
+&nbsp;&nbsp;-&nbsp;`variables`:&nbsp;problem&nbsp;variables&nbsp;(dict)<br>
+&nbsp;&nbsp;-&nbsp;`ok`:&nbsp;valid&nbsp;solution&nbsp;obtained&nbsp;flag&nbsp;(boolean)<br>
+&nbsp;&nbsp;-&nbsp;`updates`:&nbsp;list&nbsp;of&nbsp;updates&nbsp;to&nbsp;model<br>
+&nbsp;<br>
+&nbsp;&nbsp;In&nbsp;addition&nbsp;the&nbsp;following&nbsp;are&nbsp;included&nbsp;is&nbsp;the&nbsp;problem&nbsp;is&nbsp;feasible:<br>
+&nbsp;&nbsp;<br>
+&nbsp;&nbsp;-&nbsp;`pf`:&nbsp;real&nbsp;power&nbsp;flow&nbsp;on&nbsp;branches<br>
+&nbsp;&nbsp;-&nbsp;`qf`:&nbsp;reactive&nbsp;power&nbsp;flow&nbsp;on&nbsp;branches<br>
+&nbsp;&nbsp;-&nbsp;`vm`:&nbsp;bus&nbsp;voltage&nbsp;magnitudes<br>
+&nbsp;&nbsp;-&nbsp;`va`:&nbsp;bus&nbsp;voltage&nbsp;angles<br>
+&nbsp;&nbsp;-&nbsp;`pg`:&nbsp;real&nbsp;power&nbsp;generation&nbsp;dispatch<br>
+&nbsp;&nbsp;-&nbsp;`qg`:&nbsp;reactive&nbsp;power&nbsp;generation&nbsp;dispatch<br>
+&nbsp;&nbsp;-&nbsp;`ac`:&nbsp;capacitors/condensors&nbsp;additions<br>
+&nbsp;&nbsp;-&nbsp;`ap`:&nbsp;real&nbsp;power&nbsp;generation&nbsp;capacity&nbsp;expansions<br>
+&nbsp;&nbsp;-&nbsp;`aq`:&nbsp;reactive&nbsp;power&nbsp;generation&nbsp;capacity&nbsp;expansions<br>
+&nbsp;&nbsp;-&nbsp;`al`:&nbsp;transformer&nbsp;and&nbsp;powerline&nbsp;capacity&nbsp;expansions</span></dd></dl>
+ <dl><dt><a name="-full_acopf"><strong>full_acopf</strong></a>(case: dict, **kwargs) -&gt; dict</dt><dd><span class="code">Solve&nbsp;full&nbsp;AC&nbsp;optimal&nbsp;powerflow</span></dd></dl>
+ <dl><dt><a name="-full_acpf"><strong>full_acpf</strong></a>(case: dict, **kwargs) -&gt; dict</dt><dd><span class="code">Solve&nbsp;full&nbsp;AC&nbsp;powerflow</span></dd></dl>
+ <dl><dt><a name="-internals"><strong>internals</strong></a>(case, all: bool = False)</dt><dd><span class="code">Generate&nbsp;solver&nbsp;internals&nbsp;in&nbsp;a&nbsp;readable&nbsp;format<br>
+&nbsp;<br>
+Arguments<br>
+---------<br>
+&nbsp;<br>
+-&nbsp;`all`:&nbsp;show&nbsp;all&nbsp;items&nbsp;instead&nbsp;of&nbsp;only&nbsp;problem&nbsp;data</span></dd></dl>
+ <dl><dt><a name="-load"><strong>load</strong></a>(case: dict, name: str = None) -&gt; dict</dt><dd><span class="code">Fix&nbsp;case&nbsp;to&nbsp;include&nbsp;branch&nbsp;line&nbsp;flows</span></dd></dl>
+ <dl><dt><a name="-time"><strong>time</strong></a>()</dt><dd><span class="code"><a href="#-time">time</a>()&nbsp;-&gt;&nbsp;floating-point&nbsp;number<br>
+&nbsp;<br>
+Return&nbsp;the&nbsp;current&nbsp;time&nbsp;in&nbsp;seconds&nbsp;since&nbsp;the&nbsp;Epoch.<br>
+Fractions&nbsp;of&nbsp;a&nbsp;second&nbsp;may&nbsp;be&nbsp;present&nbsp;if&nbsp;the&nbsp;system&nbsp;clock&nbsp;provides&nbsp;them.</span></dd></dl>
+ <dl><dt><a name="-violations"><strong>violations</strong></a>(
+    data,
+    precision: float = 4,
+    error: float = 0.02,
+    formatter: str | Callable = None
+) -&gt; int | str | dict</dt><dd><span class="code">Enumerate&nbsp;violations&nbsp;in&nbsp;case<br>
+&nbsp;<br>
+Arguments<br>
+---------<br>
+&nbsp;<br>
+-&nbsp;`data`:&nbsp;case&nbsp;data<br>
+&nbsp;<br>
+-&nbsp;`precision`:&nbsp;floating&nbsp;point&nbsp;precision&nbsp;to&nbsp;use&nbsp;for&nbsp;data<br>
+&nbsp;<br>
+-&nbsp;`error`:&nbsp;fraction&nbsp;error&nbsp;tolerance&nbsp;for&nbsp;data&nbsp;checks<br>
+&nbsp;<br>
+-&nbsp;`formatter`:&nbsp;formatting&nbsp;of&nbsp;return&nbsp;value<br>
+&nbsp;<br>
+Returns<br>
+-------<br>
+&nbsp;<br>
+`int`:&nbsp;count&nbsp;of&nbsp;violations&nbsp;(`formatter`==`"counter"`)<br>
+&nbsp;<br>
+`str`:&nbsp;table&nbsp;of&nbsp;violations&nbsp;(`formatter`==`"table"`)<br>
+&nbsp;<br>
+`dict`:&nbsp;violations&nbsp;data&nbsp;(`formatter`==`None`)<br>
+&nbsp;<br>
+*varies*:&nbsp;whatever&nbsp;`formatter`&nbsp;return&nbsp;if&nbsp;callable</span></dd></dl>
+ <dl><dt><a name="-warn"><strong>warn</strong></a>(message, category=None, stacklevel=1, source=None, *,
+     skip_file_prefixes=&lt;unrepresentable&gt;)</dt><dd><span class="code">Issue&nbsp;a&nbsp;warning,&nbsp;or&nbsp;maybe&nbsp;ignore&nbsp;it&nbsp;or&nbsp;raise&nbsp;an&nbsp;exception.<br>
+&nbsp;<br>
+message<br>
+&nbsp;&nbsp;Text&nbsp;of&nbsp;the&nbsp;warning&nbsp;message.<br>
+category<br>
+&nbsp;&nbsp;The&nbsp;Warning&nbsp;category&nbsp;subclass.&nbsp;Defaults&nbsp;to&nbsp;UserWarning.<br>
+stacklevel<br>
+&nbsp;&nbsp;How&nbsp;far&nbsp;up&nbsp;the&nbsp;call&nbsp;stack&nbsp;to&nbsp;make&nbsp;this&nbsp;warning&nbsp;appear.&nbsp;A&nbsp;value&nbsp;of&nbsp;2&nbsp;for<br>
+&nbsp;&nbsp;example&nbsp;attributes&nbsp;the&nbsp;warning&nbsp;to&nbsp;the&nbsp;caller&nbsp;of&nbsp;the&nbsp;code&nbsp;calling&nbsp;<a href="#-warn">warn</a>().<br>
+source<br>
+&nbsp;&nbsp;If&nbsp;supplied,&nbsp;the&nbsp;destroyed&nbsp;object&nbsp;which&nbsp;emitted&nbsp;a&nbsp;ResourceWarning<br>
+skip_file_prefixes<br>
+&nbsp;&nbsp;An&nbsp;optional&nbsp;tuple&nbsp;of&nbsp;module&nbsp;filename&nbsp;prefixes&nbsp;indicating&nbsp;frames&nbsp;to&nbsp;skip<br>
+&nbsp;&nbsp;during&nbsp;stacklevel&nbsp;computations&nbsp;for&nbsp;stack&nbsp;frame&nbsp;attribution.</span></dd></dl>
+</td></tr></table><p>
+<table class="section">
+<tr class="decor data-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Data</strong></td></tr>
+    
+<tr><td class="decor data-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><strong>dcline</strong> = dcline(F_BUS=0, T_BUS=1, BR_STATUS=2, PF=3, PT=4..._QMINF=19, MU_QMAXF=20, MU_QMINT=21, MU_QMAXT=22)</td></tr></table>
+</body></html>

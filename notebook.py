@@ -190,7 +190,8 @@ def _(solvers):
     name,line_order = (
         ("case4r",[0,2,1,3,4]),
         ("case9m",[3,0,1,2,4,5,6,7,8]),
-    )[1] # pick one
+        ("case9dc",None)
+    )[2] # pick one
     case = solvers.load(name)
     return case, line_order, name
 
@@ -313,7 +314,7 @@ def _(case, solvers):
 @app.cell
 def _(initial_opf, mo):
     mo.md(rf"""
-    The full AC OPF in `pypower` reports that it "{initial_opf["status"].lower()}" as presented in the base case, and the solution's constraint violations are shown in Table 3. 
+    The full AC OPF in `pypower` reports that it "{initial_opf["status"].lower()}" as presented in the base case, and the solution's constraint violations are shown in Table 3.
     """)
     return
 
@@ -458,7 +459,7 @@ def _(mo):
 
 @app.cell
 def _(solvers):
-    wecc=solvers.load("wecc240")
+    wecc=solvers.load("case240_2011")
     return
 
 
@@ -518,7 +519,10 @@ def _(mo, solvers):
 def _():
     import marimo as mo
     import solvers
-
+    import pandas as pd
+    pd.options.display.width = None
+    pd.options.display.max_rows = None
+    pd.options.display.max_columns = None
     return mo, solvers
 
 

@@ -1,6 +1,6 @@
 """Single case test script"""
 
-test = "case300"
+test = "case9dc"
 
 import pandas as pd
 pd.options.display.max_rows = None
@@ -32,10 +32,6 @@ if result["ok"] and violations(result,formatter="counter"):
     print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
 if result["warnings"]:
     print("WARNINGS:",*result["warnings"],sep="\n  - ")
-if not result["ok"]:
-    print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(result["case"]).items()],sep="\n")
-    print(internals(result))
-    quit()
 
 if result["ok"]:
     result = full_acpf(case,VERBOSE=0,OUT_ALL=0)
@@ -44,26 +40,26 @@ if result["ok"]:
         print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
 
 if not result["ok"] or violations(result,formatter="counter") > 0:
-    fast_osp = decoupled_acosp(case)
-    print(f"""Fast AC OSP............. {fast_osp["status"]} in {fast_osp["time"]:.2f} s""",flush=True)
-    if not fast_osp["ok"]:
+    fast_oce = decoupled_acoce(case)
+    print(f"""Fast AC OCE............. {fast_oce["status"]} in {fast_oce["time"]:.2f} s""",flush=True)
+    if not fast_oce["ok"]:
 
         print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(case).items()],sep="\n")
-        print(internals(fast_osp))
+        print(internals(fast_oce))
 
     else:
 
-        if fast_osp["updates"]:
-            print("  Updates:",*fast_osp["updates"],sep="\n  - ")
+        if fast_oce["updates"]:
+            print("  Updates:",*fast_oce["updates"],sep="\n  - ")
 
-        # print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(fast_osp["solution"]).items()],sep="\n")
+        # print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(fast_oce["solution"]).items()],sep="\n")
 
-        result = full_acopf(fast_osp["solution"],VERBOSE=0,OUT_ALL=0)
+        result = full_acopf(fast_oce["solution"],VERBOSE=0,OUT_ALL=0)
         print(f"""Final AC OPF............ {result["status"]} in {result["time"]:.2f} s""",flush=True)
         if result["ok"] and violations(result,formatter="counter"):
             print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
 
-        result = decoupled_acopf(fast_osp["solution"])
+        result = decoupled_acopf(fast_oce["solution"])
         print(f"""Final FD OPF............ {result["status"]} in {result["time"]:.2f} s""",flush=True)
         if result["ok"]:
             if violations(result,formatter="counter"):
@@ -71,11 +67,9 @@ if not result["ok"] or violations(result,formatter="counter") > 0:
         else:
             print(internals(result,all=True))
 
-        result = full_acpf(fast_osp["solution"],VERBOSE=0,OUT_ALL=0)
+        result = full_acpf(fast_oce["solution"],VERBOSE=0,OUT_ALL=0)
         print(f"""Final AC PF............. {result["status"]} in {result["time"]:.2f} s""",flush=True)
         if result["ok"] and violations(result,formatter="counter"):
             print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
 
         print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(result["solution"]).items()],sep="\n")
-
-        # print(internals(fast_osp))

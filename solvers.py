@@ -5,6 +5,7 @@ from copy import deepcopy as copy
 import importlib
 from warnings import warn
 from time import time
+from collections import namedtuple
 
 import numpy as np
 import scipy as sp
@@ -18,6 +19,8 @@ from pypower import idx_bus as bus
 from pypower import idx_brch as branch
 from pypower import idx_gen as gen
 from pypower import idx_cost as cost
+from pypower import idx_dcline
+dcline = namedtuple("dcline",idx_dcline.c.keys())(**idx_dcline.c)
 
 def load(case:dict,name:str=None) -> dict:
     """Fix case to include branch line flows"""
@@ -414,7 +417,7 @@ def decoupled_acopf(
     result["time"] = round(toc-tic,3)
     return result
 
-def decoupled_acosp(
+def decoupled_acoce(
     data:dict,
     costs:dict[str,float]=None,
     margin:float=0.15,
@@ -422,7 +425,7 @@ def decoupled_acosp(
     setpoints:float|bool|None=None,
     smallangles:float|None=None,
     **options) -> dict:
-    """Solve decoupled optimal sizing/placement problem
+    """Solve decoupled optimal capacity expansion problem
     
     Arguments
     ---------
@@ -442,7 +445,7 @@ def decoupled_acosp(
 
     - `setpoints`: set voltage setpoints on generation busses
 
-    - `smallangles`: restrict voltage angles
+    - `smallangles`: restrict voltage angles to near zero
 
     - `**options`: `cvxpy` solver options
 
@@ -461,6 +464,7 @@ def decoupled_acosp(
       - `parameters`: problem parameters (dict)
       - `variables`: problem variables (dict)
       - `ok`: valid solution obtained flag (boolean)
+      - `updates`: list of updates to model
 
       In addition the following are included is the problem is feasible:
       
@@ -778,14 +782,61 @@ def decoupled_acosp(
     result["time"] = round(toc-tic,3)
     return result
 
+def internals(case,
+    all:bool=False,
+    ):
+    """Generate solver internals in a readable format
+
+    Arguments
+    ---------
+
+    - `all`: show all items instead of only problem data
+    """
+    def dump(x):
+        if isinstance(x,dict):
+            return("\n\n  ".join([f"{x}:\n    {str(y).replace('\n','\n    ')}" for x,y in x.items()]))
+        elif isinstance(x,list):
+            return("\n  ".join((f"{y}" for y in x)))
+        else:
+            return str(x).replace("\n","  \n")
+
+    keys = case.keys() if all else ["problem","constants","parameters","variables","warnings"]
+    return "\n".join([f"\n{x}\n{'-'*len(x)}\n\n  {dump(y)}" for x,y in case.items() if x in keys])
+
 def violations(data, 
     precision:float=4, # rounding on data before checking
     error:float=0.02, # error margin on tests
     formatter:str|Callable=None, # formatting call for results (or "counter","table",None)
-    ):
-    """Enumerate violations in case"""
-    result = {"bus": [], "gen": [], "branch": []}
+    ) -> int|str|dict:
+    """Enumerate violations in case
 
+    Arguments
+    ---------
+
+    - `data`: case data
+
+    - `precision`: floating point precision to use for data
+
+    - `error`: fraction error tolerance for data checks
+
+    - `formatter`: formatting of return value
+
+    Returns
+    -------
+
+    `int`: count of violations (`formatter`==`"counter"`)
+
+    `str`: table of violations (`formatter`==`"table"`)
+
+    `dict`: violations data (`formatter`==`None`)
+
+    *varies*: whatever `formatter` return if callable
+    """
+    result = {"bus": [], "gen": [], "branch": []}
+    if "dcline" in data:
+        result["dcline"] = []
+
+    # check busses
     if "bus" in data:
         for n, v in enumerate(
             data["bus"][:, (bus.VM, bus.VA, bus.VMIN, bus.VMAX)].round(precision)
@@ -793,9 +844,10 @@ def violations(data,
             VM, VA, VMIN, VMAX = map(float, v)
             if not VMIN*(1-error) <= VM <= VMAX*(1+error):
                 result["bus"].append((n, f"{VM=} pu.V outside ({VMIN=},{VMAX=})"))
+
+    # check generators
     if "gen" in data:
-        for n, g in enumerate(
-            data["gen"][
+        for n, g in enumerate(data["gen"][
                 :, (gen.PG, gen.QG, gen.PMIN, gen.PMAX, gen.QMIN, gen.QMAX)
             ].round(precision)
         ):
@@ -806,11 +858,27 @@ def violations(data,
                 result["gen"].append((n, f"{QG=} MVAr outside ({QMIN=},{QMAX=})"))
             if QMIN < 0 and QMIN < QMAX and not QMIN*(1+error) <= QG <= QMAX*(1+error):
                 result["gen"].append((n, f"{QG=} MVAr outside ({QMIN=},{QMAX=})"))
+    
+    # check branches
     if "branch" in data and data["branch"].shape[1] >= branch.PF:
-        for n, b in enumerate(data["branch"][:,[branch.PF,branch.RATE_A]]):
+        for n, b in enumerate(data["branch"][:,(branch.PF,branch.RATE_A)]):
             PF, RATE_A = map(float, np.abs(b))
             if RATE_A > 0 and PF > RATE_A*(1+error):
                 result["branch"].append((n, f"|PF|={PF:.1f} MVA outside (0,{RATE_A=:.1f})"))
+
+    # check dclines
+    if "dcline" in data and data["dcline"].shape[1]:
+        for n,d in enumerate(data["dcline"][
+                :,(dcline.PF,dcline.QF,dcline.PT,dcline.QT,dcline.PMIN,dcline.PMAX,
+                    dcline.QMINF,dcline.QMAXF,dcline.QMINT,dcline.QMAXT)]):
+            PF,QF,PT,QT,PMIN,PMAX,QMINF,QMAXF,QMINT,QMAXT = map(float,d)
+            if not PMIN <= PF <= PMAX:
+                result["dcline"].append((n,f"{PF=} outside ({PMIN=},{PMAX=})"))
+            if not QMINF <= QF <= QMAXF:
+                result["dcline"].append((n,f"{QF=} outside ({QMINF=},{QMAXF=})"))
+            if not QMINT <= QT <= QMAXT:
+                result["dcline"].append((n,f"{QT=} outside ({QMINT=},{QMAXT=})"))
+
     match formatter:
         case None:
             return result
@@ -821,26 +889,52 @@ def violations(data,
         case "_":
             return formatter(result)
 
-def as_frames(data,showall=False,**kwargs):
-    """Return case data as dataframes"""
+def as_frames(data:dict,
+    showall:bool=False,
+    precision:int=3,
+    **kwargs) -> dict:
+    """Return case data as dataframes
+
+    Arguments
+    ---------
+
+    - `data`: case data
+
+    - `showall`: show all data instead of solver-related data only
+
+    - `precision`: data rounding before loading into frames
+
+    Returns
+    -------
+
+    - `dict`: data frames of case data
+    """
     if not kwargs and showall is False:
         kwargs = dict(bus="BUS_I,BUS_TYPE,PD,QD,BS,VM,VA,VMAX,VMIN",
                       branch="F_BUS,T_BUS,BR_STATUS,BR_X,RATE_A,PF,QF",
                       gen="GEN_BUS,GEN_STATUS,PG,QG,PMIN,PMAX,QMIN,QMAX",
+                      dcline="F_BUS,T_BUS,BR_STATUS,PF,PT,PMIN,PMAX,QF,QT,QMINF,QMAXF,QMINT,QMAXT",
                      )
     columns = {
         "bus":"BUS_I,BUS_TYPE,PD,QD,GS,BS,BUS_AREA,VM,VA,BASE_KV,ZONE,VMAX,VMIN,LAM_P,LAM_Q,MU_VMAX,MY_VMIN",
         "branch": "F_BUS,T_BUS,BR_R,BR_X,BR_B,RATE_A,RATE_B,RATE_C,TAP,SHIFT,BR_STATUS,ANGMIN,ANGMAX,PF,QF,PT,QT,MU_SF,MU_ST,MU_ANGMAX,MU_ANGMIN",
         "gen":"GEN_BUS,PG,QG,QMAX,QMIN,VG,MBASE,GEN_STATUS,PMAX,PMIN,PC1,PC2,QC1MIN,QC1MAX,QC2MIN,QC2MAX,RAMP_AGC,RAMP_10,RAMP_30,RAMP_Q,APF,MU_PMAX,MU_PMIN,MU_QMAX,MU_QMIN",
+        "dcline":"F_BUS,T_BUS,BR_STATUS,PF,PT,QF,QT,VF,VT,PMIN,PMAX,QMINF,QMAXF,QMINT,QMAXT,LOSS0,LOSS1,MU_PMIN,MU_PMAX,MU_QMINF,MU_QMAXF,MU_QMINT,MU_QMAXT",
         # "gencost":"MODEL,STARTUP,SHUTDOWN,N,COST0,COST1,COST2",
     }
     return {x:pd.DataFrame(
-            data[x].round(3),
+            data[x].round(precision),
             columns=y.split(",")[:data[x].shape[1]],
         )[kwargs[x].split(",") if x in kwargs else y.split(",")[:data[x].shape[1]]] for x,y in columns.items() if x in data}
 
-def as_mdtable(violations):
-    """Format violation results as a table"""
+def as_mdtable(violations:dict):
+    """Format violation results as a markdown table
+
+    Arguments
+    ---------
+
+    - `violations`: dict of violations found (see `violations`)
+    """
     result = []
     for key, values in violations.items():
         result.append(f"| **{key.title()}** | Violation(s) |")
@@ -853,8 +947,14 @@ def as_mdtable(violations):
         result.append("")
     return "\n".join(result)
 
-def as_table(violations):
-    """Format violation results as a table"""
+def as_table(violations:dict):
+    """Format violation results as a table
+
+    Arguments
+    ---------
+
+    - `violations`: dict of violations found (see `violations`)
+    """
     data = []
     colwidth = [7,0]
     for key, values in violations.items():
@@ -867,27 +967,24 @@ def as_table(violations):
         return "No violations"
     result = [
         "ELEMENT" + " "*(colwidth[0]-7) + "  VIOLATION",
-        # " ".join(['-'*x for x in colwidth])
     ]
     for key,value in data:
         result.append(key + "  "*(colwidth[0]-len(key)) + " " + value)
     return "\n".join(result)
 
-def internals(case,all=False):
-    """Generate solver internals in a readable format"""
-    def dump(x):
-        if isinstance(x,dict):
-            return("\n\n  ".join([f"{x}:\n    {str(y).replace('\n','\n    ')}" for x,y in x.items()]))
-        elif isinstance(x,list):
-            return("\n  ".join((f"{y}" for y in x)))
-        else:
-            return str(x).replace("\n","  \n")
+def as_mermaid(case,
+    bus_order=None,
+    line_order=None,
+    ):
+    """Generate Mermaid network diagram
 
-    keys = case.keys() if all else ["problem","constants","parameters","variables","warnings"]
-    return "\n".join([f"\n{x}\n{'-'*len(x)}\n\n  {dump(y)}" for x,y in case.items() if x in keys])
+    Arguments
+    ---------
 
-def as_mermaid(case,bus_order=None,line_order=None):
-    """Generate Mermaid network diagram""" 
+    - `bus_order`: change the ordering of the busses to avoid crossovers
+
+    - `line_order`: change the ordering of the lines to avoid crossovers
+    """ 
     result = [
         "flowchart LR",
         "classDef bus fill:#000",
@@ -895,34 +992,47 @@ def as_mermaid(case,bus_order=None,line_order=None):
         "classDef genhot fill:#f00",
         "classDef bus color:white,font-weight:bold"]
 
-    nodes = case["bus"][:,[bus.BUS_I,bus.PD,bus.QD,bus.VM,bus.VA,bus.VMIN,bus.VMAX]]
-    if bus_order is not None:
-        nodes = nodes[bus_order,:]
-    result.extend([f"  {int(i)}[{vm:.3f} V\n{va:.3f}&deg;]:::bushot" 
-        for i,pd,qd,vm,va,vmin,vmax in nodes if vm < vmin or vm > vmax])
-    result.extend([f"  {int(i)}[{vm:.3f} V\n{va:.3f}&deg;]:::bus" 
-        for i,pd,qd,vm,va,vmin,vmax in nodes if vmin <= vm <= vmax and va != 0.0])
-    result.extend([f"  {int(i)}[{int(i)}]:::bus" 
-        for i,pd,qd,vm,va,vmin,vmax in nodes if vm == 1.0 and va == 0.0])
-    result.extend([f"""  {int(i)} ==>|{qd:+.1f}j MVAr| L{int(i)}@{{ shape: tri, label: "{pd:+.1f} MW"}} """ 
-        for i,pd,qd,va,vm,vmin,vmax in nodes if pd**2 + qd**2 > 0])
+    if "bus" in case:
+        nodes = case["bus"][:,[bus.BUS_I,bus.PD,bus.QD,bus.VM,bus.VA,bus.VMIN,bus.VMAX]]
+        if bus_order is not None:
+            nodes = nodes[bus_order,:]
+        result.extend([f"  {int(i)}[{vm:.3f} V\n{va:.3f}&deg;]:::bushot" 
+            for i,pd,qd,vm,va,vmin,vmax in nodes if vm < vmin or vm > vmax])
+        result.extend([f"  {int(i)}[{vm:.3f} V\n{va:.3f}&deg;]:::bus" 
+            for i,pd,qd,vm,va,vmin,vmax in nodes if vmin <= vm <= vmax and va != 0.0])
+        result.extend([f"  {int(i)}[{int(i)}]:::bus" 
+            for i,pd,qd,vm,va,vmin,vmax in nodes if vm == 1.0 and va == 0.0])
+        result.extend([f"""  {int(i)} ==>|{qd:+.1f}j MVAr| L{int(i)}@{{ shape: tri, label: "{pd:+.1f} MW"}} """ 
+            for i,pd,qd,va,vm,vmin,vmax in nodes if pd**2 + qd**2 > 0])
 
-    gens = case["gen"][:,[gen.GEN_BUS,gen.PG,gen.QG,gen.PMIN,gen.PMAX,gen.QMIN,gen.QMAX]]
-    result.extend([f"  G{int(b)}(({pmax:.0f} MW)) ==>|{p:+.1f}{q:+.1f}j MVA| {int(b)} " 
-        for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 > 0 and pmin <= p <= pmax and qmin <= q <= qmax])
-    result.extend([f"  G{int(b)}(({pmax:.0f} MW)):::genhot ==>|{p:+.1f}{q:+.1f}j MVA| {int(b)} " 
-        for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 > 0 and not ( pmin <= p <= pmax and qmin <= q <= qmax ) ])
-    result.extend([f"  G{int(b)}(({pmax:.0f} MW)) --> {int(b)} " 
-        for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 == 0])
-    
-    lines = case["branch"][:,[branch.F_BUS,branch.T_BUS,branch.PF,branch.QF,branch.RATE_A]]
-    if line_order is not None:
-        lines = lines[line_order]
-    result.extend([f"  {int(f)} --> {int(t)}" 
-        for f,t,p,q,m in lines if p**2+q**2==0])
-    result.extend([f"  {int(f)} ==>|<font color={'red' if abs(p)>m else 'black'}>{p:+.1f}{q:+.1f}j MVA</font>| {int(t)}" 
-        if f > 0 else f"  {int(t)} ==>|<font color= {'red' if abs(p)>m else 'black'}>{-p:+.1f}{-q:+.1f}j MVA</font>| {int(f)}"
-        for f,t,p,q,m in lines if p**2+q**2>0])
+    if "gen" in case:
+        gens = case["gen"][:,[gen.GEN_BUS,gen.PG,gen.QG,gen.PMIN,gen.PMAX,gen.QMIN,gen.QMAX]]
+        result.extend([f"  G{int(b)}(({pmax:.0f} MW)) -->|{p:+.1f}{q:+.1f}j MVA| {int(b)} " 
+            for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 > 0 and pmin <= p <= pmax and qmin <= q <= qmax])
+        result.extend([f"  G{int(b)}(({pmax:.0f} MW)):::genhot -->|{p:+.1f}{q:+.1f}j MVA| {int(b)} " 
+            for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 > 0 and not ( pmin <= p <= pmax and qmin <= q <= qmax ) ])
+        result.extend([f"  G{int(b)}(({pmax:.0f} MW)) -. X .-> {int(b)} " 
+            for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 == 0])
+
+    if "branch" in case:
+        lines = case["branch"][:,[branch.F_BUS,branch.T_BUS,branch.PF,branch.QF,branch.RATE_A]]
+        if line_order is not None:
+            lines = lines[line_order]
+        result.extend([f"  {int(f)} -. X .-> {int(t)}" 
+            for f,t,p,q,m in lines if p**2+q**2==0])
+        result.extend([f"  {int(f)} -->|<font color={'red' if abs(p)>m else 'black'}>{p:+.1f}{q:+.1f}j MVA</font>| {int(t)}" 
+            if f > 0 else f"  {int(t)} -->|<font color= {'red' if abs(p)>m else 'black'}>{-p:+.1f}{-q:+.1f}j MVA</font>| {int(f)}"
+            for f,t,p,q,m in lines if p**2+q**2>0])
+
+    if "dcline" in case:
+        lines = case["dcline"][:,[dcline.F_BUS,dcline.T_BUS,dcline.PF,dcline.QF,dcline.PMAX]]
+        if line_order is not None:
+            lines = lines[line_order]
+        result.extend([f"  {int(f)} -. X .-> {int(t)}" 
+            for f,t,p,q,m in lines if p**2+q**2==0])
+        result.extend([f"  {int(f)} ==>|<font color={'red' if abs(p)>m else 'black'}>{p:+.1f}{q:+.1f}j MVA</font>| {int(t)}" 
+            if f > 0 else f"  {int(t)} ==>|<font color= {'red' if abs(p)>m else 'black'}>{-p:+.1f}{-q:+.1f}j MVA</font>| {int(f)}"
+            for f,t,p,q,m in lines if p**2+q**2>0])
 
     return "\n".join(result)
 
@@ -948,7 +1058,7 @@ if __name__ == '__main__':
                 "Initial AC OPF": "-  ",
                 "Initial FD OPF": "-  ",
                 "Initial AC PF": "-  ",
-                "Fast OSP": "-  ",
+                "Fast OCE": "-  ",
                 "Final FD OPF": "-  ",
                 "Final AC OPF": "-  ",
                 "Final AC PF": "-  ",
@@ -972,9 +1082,9 @@ if __name__ == '__main__':
                 print(violations(initial_case["solution"],formatter="table"),file=fh)
                 results[name]["Base case"] = "violations" if violations(initial_case["solution"],formatter="counter") else "ok"
 
-            print("\n*************************",file=fh)
+            print("\n************************",file=fh)
             print("*** INITIAL FULL OPF ***",file=fh)
-            print("*************************\n",file=fh)
+            print("************************\n",file=fh)
             initial_acopf = full_acopf(case,**ppoptions)
             print("STATUS:",initial_acopf["status"],file=fh)
             print(f"TIME: {initial_acopf['time']:.3f} s",file=fh)
@@ -1014,28 +1124,28 @@ if __name__ == '__main__':
 
                 if not fast_acopf["ok"] or violations(initial_acpf["solution"],formatter="counter") > 0:
 
-                    print("\n***********************************",file=fh)
-                    print("*** DECOUPLED AC OPTIMAL SIZING ***",file=fh)
-                    print("***********************************\n",file=fh)
-                    fast_acosp = decoupled_acosp(case)
-                    print("STATUS:",fast_acosp["status"],f"(cost={fast_acosp["value"]})",file=fh)
-                    print(f"TIME: {fast_acosp['time']:.3f} s",file=fh)
-                    results[name]["Fast OSP"] = fast_acosp["status"] if not fast_acosp["ok"] else ("warning" if fast_acosp["warnings"] else "ok")
-                    print(*[f"{x}:\n{y}\n" for x,y in as_frames(fast_acosp["solution"]).items()],sep="\n",file=fh)
-                    if not fast_acosp["ok"]:
+                    print("\n**************************************",file=fh)
+                    print("*** DECOUPLED AC OPTIMAL EXPANSION ***",file=fh)
+                    print("**************************************\n",file=fh)
+                    fast_acoce = decoupled_acoce(case)
+                    print("STATUS:",fast_acoce["status"],f"(cost={fast_acoce["value"]})",file=fh)
+                    print(f"TIME: {fast_acoce['time']:.3f} s",file=fh)
+                    results[name]["Fast OCE"] = fast_acoce["status"] if not fast_acoce["ok"] else ("warning" if fast_acoce["warnings"] else "ok")
+                    print(*[f"{x}:\n{y}\n" for x,y in as_frames(fast_acoce["solution"]).items()],sep="\n",file=fh)
+                    if not fast_acoce["ok"]:
 
-                        print(internals(fast_acosp),file=fh)
+                        print(internals(fast_acoce),file=fh)
                     
                     else:
 
-                        print(violations(fast_acosp["solution"],formatter="table"),file=fh)
-                        results[name]["Fast OSP"] = "violations" if violations(fast_acosp["solution"],formatter="counter") else "ok"
-                        print("\nADDITIONS\n=========",*fast_acosp["updates"],sep="\n - ",file=fh)
+                        print(violations(fast_acoce["solution"],formatter="table"),file=fh)
+                        results[name]["Fast OCE"] = "violations" if violations(fast_acoce["solution"],formatter="counter") else "ok"
+                        print("\nADDITIONS\n=========",*fast_acoce["updates"],sep="\n - ",file=fh)
                         
                         print("\n***************************",file=fh)
                         print("*** FINAL DECOUPLED OPF ***",file=fh)
                         print("***************************\n",file=fh)
-                        final_opf = decoupled_acopf(fast_acosp["solution"])
+                        final_opf = decoupled_acopf(fast_acoce["solution"])
                         print("STATUS:",final_opf["status"],file=fh)
                         print(f"TIME: {final_opf['time']:.3f} s",file=fh)
                         results[name]["Final FD OPF"] = final_opf["status"] if not final_opf["ok"] else ("warning" if final_opf["warnings"] else "ok")
@@ -1050,7 +1160,7 @@ if __name__ == '__main__':
                         print("\n**************************",file=fh)
                         print("*** FINAL FULL OPF ***",file=fh)
                         print("**************************\n",file=fh)
-                        final_acopf = full_acopf(fast_acosp["solution"],**ppoptions)
+                        final_acopf = full_acopf(fast_acoce["solution"],**ppoptions)
                         print("STATUS:",final_acopf["status"],file=fh)
                         print(f"TIME: {final_acopf['time']:.3f} s",file=fh)
                         results[name]["Final AC OPF"] = final_acopf["status"] if not final_acopf["ok"] else ("warning" if final_acopf["warnings"] else "ok")
@@ -1064,7 +1174,7 @@ if __name__ == '__main__':
                         print("\n**************************",file=fh)
                         print("*** FINAL AC POWERFLOW ***",file=fh)
                         print("**************************\n",file=fh)
-                        final_acpf = full_acpf(fast_acosp["solution"],setpoints=True,**ppoptions)
+                        final_acpf = full_acpf(fast_acoce["solution"],setpoints=True,**ppoptions)
                         print("STATUS:",final_acpf["status"],file=fh)
                         print(f"TIME: {final_acpf['time']:.3f} s",file=fh)
                         results[name]["Final AC PF"] = final_acpf["status"] if not final_acpf["ok"] else ("warning" if final_acpf["warnings"] else "ok")
