@@ -114,6 +114,8 @@ def full_acopf(case:dict,**kwargs) -> dict:
 def decoupled_acopf(
     data:dict,
     curtailment:float=None,
+    setpoints:float|bool|None=None,
+    smallangles:float|None=None,
     **options,
     ) -> dict:
     """Solve decoupled optimal powerflow problem
@@ -125,6 +127,8 @@ def decoupled_acopf(
 
     - `curtailment`: cost of curtailment per-unit generation cost
       (None disables curtailment)
+
+    - `setpoints`: constrain to voltages to gen.VG or set ref voltage(s)
 
     - `**options`: `cvxpy` solver options
 
@@ -281,7 +285,7 @@ def decoupled_acopf(
 
     # cost function
     cost = 0
-    # cost = cp.sum(pg**2+qg**2) # TODO: replace with generation costs from gencost
+    # cost = cp.sum(pg**2+qg**2) # TODO: replace with gencost if not just feasibility check
     if curtailment:
         cost += curtailment * cp.sum ( pc**2 + qc**2 ) # curtailment cost
 
@@ -302,9 +306,19 @@ def decoupled_acopf(
 
         # practical constraints not specified in the mathematical model
         va[ref] == 0,  # reference bus angles are always 0
-        vm[gi] == vg,  # bus voltage setpoints
-        cp.abs(va) <= 0.175,  # +/- 10 degrees for decoupling assumptions to be valid
     ]
+
+    # small angle assumption
+    if not smallangles is None:
+        constraints.append(cp.abs(va) <= smallangles)  # +/- 10 degrees for decoupling assumptions to be valid
+
+    # bus voltage setpoints
+    if isinstance(setpoints,float):
+        constraints.append(vm[ref] == setpoints)
+    elif setpoints is True:
+        constraints.append(vm[gi] == vg)
+
+    # curtailment
     if curtailment is None:
         constraints += [
             f @ pf + pd == g @ pg, # Equation (2a)
@@ -335,9 +349,9 @@ def decoupled_acopf(
         "objective": objective,
         "constraints": [str(x) for x in constraints],
         "constants": {
-            "b (pm.S)": b.value.todense(),
-            "f (pu)": f.value.todense(),
-            "g (pu)": g.value.todense(),
+            "b (pm.S)": b.value.todense(), # TODO: remove todense
+            "f (pu)": f.value.todense(), # TODO: remove todense
+            "g (pu)": g.value.todense(), # TODO: remove todense
             "vl (pu.kV)": vl.value.T[0],
             "vu (pu.kV)": vu.value.T[0],
             "pl (pu.MW)": pl.value.T[0],
@@ -405,6 +419,8 @@ def decoupled_acosp(
     costs:dict[str,float]=None,
     margin:float=0.15,
     allin:bool=True,
+    setpoints:float|bool|None=None,
+    smallangles:float|None=None,
     **options) -> dict:
     """Solve decoupled optimal sizing/placement problem
     
@@ -423,6 +439,10 @@ def decoupled_acosp(
     - `margin`: load margin for sizing
 
     - `allin`: enable use of all available resources
+
+    - `setpoints`: set voltage setpoints on generation busses
+
+    - `smallangles`: restrict voltage angles
 
     - `**options`: `cvxpy` solver options
 
@@ -631,8 +651,6 @@ def decoupled_acosp(
 
         # practical constraints not specified in the mathematical model
         va[ref] == 0,  # reference bus angle is always 0
-        vm[gi] == vg,  # bus voltage setpoints
-        cp.abs(va) <= 0.175,  # +/- 10 degrees for decoupling assumptions to be valid
 
         # constraints on addition placements
         ac[gi] == 0, # no capacitors/condensors at generation busses
@@ -641,6 +659,16 @@ def decoupled_acosp(
         cp.abs(qu) + aq <= pu + ap,
         cp.abs(ql) + aq <= pu + ap,
     ]
+
+    # small angle assumption
+    if not smallangles is None:
+        constraints.append(cp.abs(va) <= smallangles)  # +/- 10 degrees for decoupling assumptions to be valid
+
+    # bus voltage setpoints
+    if isinstance(setpoints,float):
+        constraints.append(vm[ref] == setpoints)
+    elif setpoints is True:
+        constraints.append(vm[gi] == vg)
 
     # problem statement
     objective = cp.Minimize(cost)
@@ -657,9 +685,9 @@ def decoupled_acosp(
         "objective": objective,
         "constraints": constraints,
         "constants": {
-            "b (pm.S)": b.value,
-            "f (pu)": f.value,
-            "g (pu)": g.value,
+            "b (pm.S)": b.value.todense(), # TODO: remove todense
+            "f (pu)": f.value.todense(), # TODO: remove todense
+            "g (pu)": g.value.todense(), # TODO: remove todense
             "vl (pu.kV)": vl.value.T[0],
             "vu (pu.kV)": vu.value.T[0],
             "pl (pu.MW)": pl.value.T[0],
@@ -774,7 +802,9 @@ def violations(data,
             PG, QG, PMIN, PMAX, QMIN, QMAX = map(float, g)
             if PMIN < PMAX and not PMIN*(1-error) <= PG <= PMAX*(1+error):
                 result["gen"].append((n, f"{PG=} MW outside ({PMIN=},{PMAX=})"))
-            if QMIN < QMAX and not QMIN*(1-error) <= QG <= QMAX*(1+error):
+            if QMIN >= 0 and QMIN < QMAX and not QMIN*(1-error) <= QG <= QMAX*(1+error):
+                result["gen"].append((n, f"{QG=} MVAr outside ({QMIN=},{QMAX=})"))
+            if QMIN < 0 and QMIN < QMAX and not QMIN*(1+error) <= QG <= QMAX*(1+error):
                 result["gen"].append((n, f"{QG=} MVAr outside ({QMIN=},{QMAX=})"))
     if "branch" in data and data["branch"].shape[1] >= branch.PF:
         for n, b in enumerate(data["branch"][:,[branch.PF,branch.RATE_A]]):
@@ -794,7 +824,7 @@ def violations(data,
 def as_frames(data,showall=False,**kwargs):
     """Return case data as dataframes"""
     if not kwargs and showall is False:
-        kwargs = dict(bus="BUS_I,PD,QD,BS,VM,VA,VMAX,VMIN",
+        kwargs = dict(bus="BUS_I,BUS_TYPE,PD,QD,BS,VM,VA,VMAX,VMIN",
                       branch="F_BUS,T_BUS,BR_STATUS,BR_X,RATE_A,PF,QF",
                       gen="GEN_BUS,GEN_STATUS,PG,QG,PMIN,PMAX,QMIN,QMAX",
                      )
@@ -971,7 +1001,7 @@ if __name__ == '__main__':
             print("\n****************************",file=fh)
             print("*** INITIAL AC POWERFLOW ***",file=fh)
             print("****************************\n",file=fh)
-            initial_acpf = full_acpf(fast_acopf["solution"] if fast_acopf["ok"] else case,**ppoptions)
+            initial_acpf = full_acpf(initial_acopf["solution"] if initial_acopf["ok"] else case,setpoints=True,**ppoptions)
             if initial_acpf["ok"]: 
                 print("STATUS:",initial_acpf["status"],file=fh)
                 print(f"TIME: {initial_acpf['time']:.3f} s",file=fh)
@@ -1034,7 +1064,7 @@ if __name__ == '__main__':
                         print("\n**************************",file=fh)
                         print("*** FINAL AC POWERFLOW ***",file=fh)
                         print("**************************\n",file=fh)
-                        final_acpf = full_acpf(fast_acosp["solution"],**ppoptions)
+                        final_acpf = full_acpf(fast_acosp["solution"],setpoints=True,**ppoptions)
                         print("STATUS:",final_acpf["status"],file=fh)
                         print(f"TIME: {final_acpf['time']:.3f} s",file=fh)
                         results[name]["Final AC PF"] = final_acpf["status"] if not final_acpf["ok"] else ("warning" if final_acpf["warnings"] else "ok")

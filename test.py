@@ -1,6 +1,6 @@
 """Single case test script"""
 
-test = "case14"
+test = "case300"
 
 import pandas as pd
 pd.options.display.max_rows = None
@@ -9,11 +9,11 @@ pd.options.display.width = None
 
 import numpy as np
 np.set_printoptions(
-    linewidth=999999,
+    linewidth=9999999,
     formatter={'float':lambda x:f"{x: 8.4f}" if x else f"{0:8.0f}"}
     )
 
-from  solvers import *
+from solvers import *
 case = load(test)
 
 result = full_acpf(case,VERBOSE=0,OUT_ALL=0)["solution"]
@@ -32,6 +32,10 @@ if result["ok"] and violations(result,formatter="counter"):
     print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
 if result["warnings"]:
     print("WARNINGS:",*result["warnings"],sep="\n  - ")
+if not result["ok"]:
+    print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(result["case"]).items()],sep="\n")
+    print(internals(result))
+    quit()
 
 if result["ok"]:
     result = full_acpf(case,VERBOSE=0,OUT_ALL=0)
