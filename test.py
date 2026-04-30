@@ -1,6 +1,6 @@
 """Single case test script"""
 
-test = "case6ww"
+test = "case14"
 
 import pandas as pd
 pd.options.display.max_rows = None
@@ -64,8 +64,8 @@ if not result["ok"] or violations(result,formatter="counter") > 0:
         if result["ok"]:
             if violations(result,formatter="counter"):
                 print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
-        # else:
-        #     print(internals(result,all=True))
+        else:
+            print(internals(result,all=True))
 
         result = full_acpf(fast_osp["solution"],VERBOSE=0,OUT_ALL=0)
         print(f"""Final AC PF............. {result["status"]} in {result["time"]:.2f} s""",flush=True)

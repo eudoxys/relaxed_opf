@@ -73,7 +73,7 @@ def full_acpf(case:dict,**kwargs) -> dict:
         }
 
     toc = time()
-    result["time"] = toc-tic
+    result["time"] = round(toc-tic,3)
     return result
 
 def full_acopf(case:dict,**kwargs) -> dict:
@@ -108,7 +108,7 @@ def full_acopf(case:dict,**kwargs) -> dict:
         }
 
     toc = time()
-    result["time"] = toc-tic
+    result["time"] = round(toc-tic,3)
     return result
 
 def decoupled_acopf(
@@ -186,26 +186,35 @@ def decoupled_acopf(
 
     # branch parameters
     br = data["branch"] # branch data
+
     f_bus = [bi[x] for x in br[:,branch.F_BUS]]
     t_bus = [bi[x] for x in br[:,branch.T_BUS]]
+    
     tap = br[:,[branch.TAP]]
     tap[np.where(tap==0)] = 1.0 # non-zero is only for transformers, zero is powerline (unity tap)
     err = np.where(tap<0)[0]
     assert len(err) == 0, f"bus[{err},TAP] < 0"
+    
     shift = br[:,[branch.SHIFT]] * np.pi / 180
+    
     br_status = br[:,[branch.BR_STATUS]]
-    br_x = br[:,[branch.BR_X]]
     err = np.where([x for x in br_status.flatten() if x not in [0,1]])[0]
     assert len(err)==0, f"bus[{err},BR_STATUS] value is not in [0,1]"
+    
+    br_x = br[:,[branch.BR_X]]
     err = np.where(br_x==0)[0]
     assert len(err) == 0, f"bus[{err},BR_X] <= 0"
+
     x = br_status/br_x/tap
+
     b = sp.sparse.coo_matrix((x.flatten(),(range(M),f_bus)),shape=(M,N)) \
         - sp.sparse.coo_matrix(((x+shift).flatten(),(range(M),t_bus)),shape=(M,N)) 
     b = cp.Constant(value=b, name="b") # line susceptances
+
     f = sp.sparse.coo_matrix((br_status.flatten(),(range(M),f_bus)),shape=(M,N)).T \
         - sp.sparse.coo_matrix((br_status.flatten(),(range(M),t_bus)),shape=(M,N)).T 
     f = cp.Constant(value=f, name="f") # line connections
+
     s = br[:,[branch.RATE_A]]/puS
     s = cp.Parameter(shape=(M,1),value=s,name="s") # line flow limits
 
@@ -213,10 +222,10 @@ def decoupled_acopf(
     gg = np.array(data["gen"])
     gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
     vg = cp.Constant(value=gg[:,[gen.VG]], name="vg") # bus voltage setpoints
-    pl = cp.Constant(value=gg[:,[gen.PMIN]], name="pl") # real power minimum
-    pu = cp.Constant(value=gg[:,[gen.PMAX]], name="pu") # real power maximum
-    ql = cp.Constant(value=gg[:,[gen.QMIN]], name="ql") # reactive power minimum
-    qu = cp.Constant(value=gg[:,[gen.QMAX]], name="qu") # reactive power maximum
+    pl = cp.Constant(value=gg[:,[gen.PMIN]]/puS, name="pl") # real power minimum
+    pu = cp.Constant(value=gg[:,[gen.PMAX]]/puS, name="pu") # real power maximum
+    ql = cp.Constant(value=gg[:,[gen.QMIN]]/puS, name="ql") # reactive power minimum
+    qu = cp.Constant(value=gg[:,[gen.QMAX]]/puS, name="qu") # reactive power maximum
     g = cp.Constant(value=sp.sparse.coo_matrix((np.ones(K),(list(range(K)),gi)),shape=(K,N)).T,name="g") # sum generators to busses
 
     # variables
@@ -324,11 +333,11 @@ def decoupled_acopf(
         "value": np.round(problem.value,4),
         "problem": problem,
         "objective": objective,
-        "constraints": constraints,
+        "constraints": [str(x) for x in constraints],
         "constants": {
-            "b (pm.S)": b.value,
-            "f (pu)": f.value,
-            "g (pu)": g.value,
+            "b (pm.S)": b.value.todense(),
+            "f (pu)": f.value.todense(),
+            "g (pu)": g.value.todense(),
             "vl (pu.kV)": vl.value.T[0],
             "vu (pu.kV)": vu.value.T[0],
             "pl (pu.MW)": pl.value.T[0],
@@ -388,7 +397,7 @@ def decoupled_acopf(
         result["ok"] = True
 
     toc = time()
-    result["time"] = toc-tic
+    result["time"] = round(toc-tic,3)
     return result
 
 def decoupled_acosp(
@@ -738,7 +747,7 @@ def decoupled_acosp(
         result["ok"] = True
 
     toc = time()
-    result["time"] = toc - tic
+    result["time"] = round(toc-tic,3)
     return result
 
 def violations(data, 
@@ -839,6 +848,8 @@ def internals(case,all=False):
     def dump(x):
         if isinstance(x,dict):
             return("\n\n  ".join([f"{x}:\n    {str(y).replace('\n','\n    ')}" for x,y in x.items()]))
+        elif isinstance(x,list):
+            return("\n  ".join((f"{y}" for y in x)))
         else:
             return str(x).replace("\n","  \n")
 
