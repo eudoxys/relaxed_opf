@@ -1,11 +1,11 @@
-Optimal capacity expansion using softened relaxed optimal powerflow
--------------------------------------------------------------------
+Fast optimal capacity expansion (OCE) using softened relaxed optimal powerflow
+------------------------------------------------------------------------------
 
 David P. Chassin, Eudoxys Sciences LLC
 
-April 2026
+*April 2026*
 
-Citation: D.P. Chassin, "Ensuring optimal powerflow feasibility using convext optimization", April 2026, https://github.com/eudoxys/relaxed_opf.
+Citation: D.P. Chassin, "Fast optimal capacity expansion (OCE) using softened relaxed optimal powerflow", April 2026, https://github.com/eudoxys/fast_oce.
 
 ----
 
