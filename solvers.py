@@ -24,18 +24,41 @@ dcline = namedtuple("dcline",idx_dcline.c.keys())(**idx_dcline.c)
 
 def load(case:dict,name:str=None) -> dict:
     """Fix case to include branch line flows"""
+
+    # import case
     module = importlib.import_module(case)
+
+    # default case name
     if name is None:
-        name = os.path.splitext(os.path.basename(case))[0]
-        if not hasattr(module,name) and hasattr(module,"case"):
-            name = "case"
+        name = os.path.splitext(os.path.basename(case))[0] # default name from case filename
+        if not hasattr(module,name):
+            cases = [x for x in dir(module) if x.startswith("case")] # find candidate for default
+            match len(cases):
+                case 0:
+                    raise ValueError("no default case found")
+                case 1:
+                    name = cases[0]
+                case _:
+                    raise ValueError("more than one case found (use `name` to choose one)")
+    
+    # load case
     if callable(getattr(module,name)):
         case = getattr(module,name)()
     else:
         case = getattr(module,name)
 
-    N,M = case["bus"].shape
+    # check case
+    assert isinstance(case,dict), "case is not a dict"
+    assert "version" in case, "case version not specified"
+    assert int(case["version"]) == 2, "only case version 2 supported"
+    assert "baseMVA" in case, "baseMVA not specified"
+    assert isinstance(case["baseMVA"],float), "baseMVA must be float"
+    assert case["baseMVA"] > 0, "baseMVA must be positive"
+    assert "bus" in case, "case must contain bus data"
+    assert "branch" in case, "case must contain branch data"
+    assert "gen" in case, "case must contain gen data"
 
+    # fix case data if needed
     N,M = case["branch"].shape
     if M < branch.QT:
         case["branch"] = np.hstack([case["branch"],np.zeros((N,branch.QT-M+1))])
@@ -175,15 +198,12 @@ def decoupled_acopf(
     assert "branch" in data, "missing branch array"
     assert "gen" in data, "missing gen array"
 
-    # dimensions
-    N = len(data["bus"])
-    M = len(data["branch"])
-    K = len(data["gen"])
 
     # per-unit system
     puS = data["baseMVA"]
 
     # bus parameters
+    N = len(data["bus"])
     bb = np.array(data["bus"])
     vl = cp.Constant(value=bb[:, [bus.VMIN]], name="vl") # voltage lower limit
     vu = cp.Constant(value=bb[:, [bus.VMAX]], name="vu") # voltage upper limit
@@ -192,6 +212,7 @@ def decoupled_acopf(
     bi = {i: n for n, i in enumerate(bb[:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
 
     # branch parameters
+    M = len(data["branch"])
     br = data["branch"] # branch data
 
     f_bus = [bi[x] for x in br[:,branch.F_BUS]]
@@ -226,6 +247,7 @@ def decoupled_acopf(
     s = cp.Parameter(shape=(M,1),value=s,name="s") # line flow limits
 
     # gen parameters
+    K = len(data["gen"])
     gg = np.array(data["gen"])
     gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
     vg = cp.Constant(value=gg[:,[gen.VG]], name="vg") # bus voltage setpoints
@@ -507,15 +529,11 @@ def decoupled_acoce(
     assert "branch" in data, "missing branch array"
     assert "gen" in data, "missing gen array"
 
-    # dimensions
-    N = len(data["bus"])
-    M = len(data["branch"])
-    K = len(data["gen"])
-
     # per-unit system
     puS = data["baseMVA"]
 
-   # bus parameters
+    # bus parameters
+    N = len(data["bus"])
     bb = data["bus"]
     vl = cp.Constant(value=bb[:, [bus.VMIN]], name="vl") # voltage lower limit
     vu = cp.Constant(value=bb[:, [bus.VMAX]], name="vu") # voltage upper limit
@@ -524,6 +542,7 @@ def decoupled_acoce(
     bi = {i: n for n, i in enumerate(bb[:, bus.BUS_I])}  # bus index (i is not necessarily reasonable)
 
     # branch parameters
+    M = len(data["branch"])
     br = data["branch"] # branch data
 
     f_bus = [bi[x] for x in br[:,branch.F_BUS]]
@@ -559,6 +578,7 @@ def decoupled_acoce(
     s = cp.Parameter(shape=(M,1),value=s,name="s") # line flow limits
 
     # gen parameters
+    K = len(data["gen"])
     gg = data["gen"]
     gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
     gs = 1 if allin else gg[:,gen.GEN_STATUS]
@@ -583,6 +603,29 @@ def decoupled_acoce(
     ap = cp.Variable(shape=(K,1), name="ap", nonneg=True) # generator real power additions
     aq = cp.Variable(shape=(K,1), name="aq", nonneg=True) # generator reactive power additions
     al = cp.Variable(shape=(M,1), name="al", nonneg=True) # powerline/transformer capacity additions
+
+    # dc line parameters
+    L = len(data["dcline"]) if "dcline" in data else 0
+    if L > 0:
+        dd = data["dcline"]
+        f_bus = [bi[x] for x in dd[:,dcline.F_BUS]]
+        t_bus = [bi[x] for x in dd[:,dcline.T_BUS]]
+        dc_status = dd[:,dcline.BR_STATUS].flatten()
+        dm = cp.Constant(
+            value=dd[:,[dcline.PMIN,dcline.PMAX,dcline.QMINF,dcline.QMAXF,dcline.QMINT,dcline.QMAXT]],
+            name="dm") # dcline flow limits
+        dl = cp.Constant(value=dd[:,[dcline.LOSS1,dcline.LOSS0]], name="l0") # dcline losses
+        df = sp.sparse.coo_matrix((dc_status,(range(L),f_bus)),shape=(L,N)) 
+        df = cp.Constant(value=df, name="df") # from bus mapping
+        dt = sp.sparse.coo_matrix((dc_status,(range(L),t_bus)),shape=(L,N))
+        dt = cp.Constant(value=dt, name="dt") # to bus mapping
+        dp = cp.Variable(shape=(L,2), name="df") # dc line real power from and to
+        dq = cp.Variable(shape=(L,2), name="df") # dc line reactive power from and to
+        dv = cp.Variable(shape=(L,2), name="vf") # dc line voltage setpoint from and to
+        # print("dm=",dm.value,sep="\n")
+        # print("dl=",dl.value,sep="\n")
+        # print("df=",df.value.todense(),sep="\n")
+        # print("dt=",dt.value.todense(),sep="\n")
 
     # sanity checks
     warnings = []
@@ -616,6 +659,10 @@ def decoupled_acoce(
             warnings.append(f"gen[{n}].vg < 0.8")
         for n in np.where(vg.value > 1.2)[0]:
             warnings.append(f"gen[{n}].vg > 1.2")
+
+    # dc line ranges
+    if L > 0:
+        warnings.append("dclines are not supported")
 
     # warn of check failures
     if warnings:

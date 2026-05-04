@@ -7,7 +7,6 @@
 
 from numpy import array
 
-
 def case():
     """Same as L{t_case9_opfv2} with addition of DC line data.
     Please see L{caseformat} for details on the case file format.
