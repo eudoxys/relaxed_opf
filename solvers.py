@@ -71,15 +71,18 @@ def full_acpf(case:dict,**kwargs) -> dict:
     try:
         result,ok = runpf(copy(case),ppoption(**kwargs))
         if ok:
-            solution = {x:y for x,y in result.items() if x in case}
-            ref = [n for n, bt in enumerate(result["bus"][:, bus.BUS_TYPE]) if bt == 3]
-            solution["bus"][:,bus.VA] = (solution["bus"][:,bus.VA] - solution["bus"][:,bus.VA][ref[0]])
+            solution = {x:np.array(y) for x,y in result.items() if x in case}
+
+            # shift reference bus angle to 0
+            ref = [n for n, bt in enumerate(result["bus"][:, bus.BUS_TYPE]) if bt == 3][0]
+            solution["bus"][:,bus.VA] = (solution["bus"][:,bus.VA] - solution["bus"][:,bus.VA][ref])
+            
             result = {
                 "case": copy(case),
                 "ok": True,
                 "status": "solved",
                 "warnings": [],
-                "solution": result,
+                "solution": solution,
             }
         else:
             result = {
@@ -107,8 +110,13 @@ def full_acopf(case:dict,**kwargs) -> dict:
     tic = time()
     try:
         result = runopf(copy(case),ppoption(**kwargs))
+        solution = {x:np.array(y) for x,y in result.items() if x in case}
+
+        # shift reference bus angle to 0
+        ref = [n for n, bt in enumerate(result["bus"][:, bus.BUS_TYPE]) if bt == 3][0]
+        solution["bus"][:,bus.VA] = (solution["bus"][:,bus.VA] - solution["bus"][:,bus.VA][ref])
+            
         if result["success"]:
-            solution = {x:y for x,y in result.items() if x in case}
             result = {
                 "case": copy(case),
                 "ok": True,
@@ -174,7 +182,7 @@ def decoupled_acopf(
       - `variables`: problem variables (dict)
       - `ok`: valid solution obtained flag (boolean)
 
-      In addition the following are included is the problem is feasible:
+      In addition the following are included when the problem is feasible:
       
       - `pf`: real power flow on branches
       - `qf`: reactive power flow on branches
@@ -198,12 +206,12 @@ def decoupled_acopf(
     assert "branch" in data, "missing branch array"
     assert "gen" in data, "missing gen array"
 
-
     # per-unit system
     puS = data["baseMVA"]
 
     # bus parameters
     N = len(data["bus"])
+    assert N > 1, "too few busses"
     bb = np.array(data["bus"])
     vl = cp.Constant(value=bb[:, [bus.VMIN]], name="vl") # voltage lower limit
     vu = cp.Constant(value=bb[:, [bus.VMAX]], name="vu") # voltage upper limit
@@ -213,6 +221,7 @@ def decoupled_acopf(
 
     # branch parameters
     M = len(data["branch"])
+    assert M > 0, "too few branches"
     br = data["branch"] # branch data
 
     f_bus = [bi[x] for x in br[:,branch.F_BUS]]
@@ -239,15 +248,17 @@ def decoupled_acopf(
         - sp.sparse.coo_matrix(((x+shift).flatten(),(range(M),t_bus)),shape=(M,N)) 
     b = cp.Constant(value=b, name="b") # line susceptances
 
-    f = sp.sparse.coo_matrix((br_status.flatten(),(range(M),f_bus)),shape=(M,N)).T \
-        - sp.sparse.coo_matrix((br_status.flatten(),(range(M),t_bus)),shape=(M,N)).T 
-    f = cp.Constant(value=f, name="f") # line connections
+    f = sp.sparse.coo_matrix((br_status.flatten(),(range(M),f_bus)),shape=(M,N)) \
+        - sp.sparse.coo_matrix((br_status.flatten(),(range(M),t_bus)),shape=(M,N)) 
+    f = cp.Constant(value=f.T, name="f") # line connections
 
-    s = br[:,[branch.RATE_A]]/puS
+    s = br[:,[branch.RATE_A]] / puS
+    s[s==0] = 1e5 # zero ratings are unlimited
     s = cp.Parameter(shape=(M,1),value=s,name="s") # line flow limits
 
     # gen parameters
     K = len(data["gen"])
+    assert K > 0, "too few generators"
     gg = np.array(data["gen"])
     gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
     vg = cp.Constant(value=gg[:,[gen.VG]], name="vg") # bus voltage setpoints
@@ -255,7 +266,30 @@ def decoupled_acopf(
     pu = cp.Constant(value=gg[:,[gen.PMAX]]/puS, name="pu") # real power maximum
     ql = cp.Constant(value=gg[:,[gen.QMIN]]/puS, name="ql") # reactive power minimum
     qu = cp.Constant(value=gg[:,[gen.QMAX]]/puS, name="qu") # reactive power maximum
-    g = cp.Constant(value=sp.sparse.coo_matrix((np.ones(K),(list(range(K)),gi)),shape=(K,N)).T,name="g") # sum generators to busses
+    g = sp.sparse.coo_matrix((np.ones(K),(list(range(K)),gi)),shape=(K,N)).T # sum generators to busses
+    g = cp.Constant(value=g,name="g") # sum generators to busses
+
+    # dc line parameters
+    L = len(data["dcline"]) if "dcline" in data else 0
+    if L > 0: # ignore DC line that are out of service
+        dc_status = data["dcline"][:,dcline.BR_STATUS].flatten()
+        dd = data["dcline"][dc_status!=0,:]
+        L = dd.shape[0]
+    if L > 0:
+        f_bus = [bi[x] for x in dd[:,dcline.F_BUS]]
+        t_bus = [bi[x] for x in dd[:,dcline.T_BUS]]
+        da = cp.Constant(value=dd[:,[dcline.LOSS1]], name="da") # dcline loss function first-order term
+        db = cp.Constant(value=dd[:,[dcline.LOSS0]], name="db")/puS # dcline loss function zero-order term
+        df = sp.sparse.coo_matrix((np.ones(L),(range(L),f_bus)),shape=(L,N)) 
+        df = cp.Constant(value=df.T, name="df") # from bus mapping
+        dt = sp.sparse.coo_matrix((np.ones(L),(range(L),t_bus)),shape=(L,N))
+        dt = cp.Constant(value=dt.T, name="dt") # to bus mapping
+        dpmin = cp.Parameter(shape=(L,1),value=dd[:,[dcline.PMIN]],name="dpmin") / puS
+        dpmax = cp.Parameter(shape=(L,1),value=dd[:,[dcline.PMAX]],name="dpmax") / puS
+        dqminf = cp.Parameter(shape=(L,1),value=dd[:,[dcline.QMINF]],name="dqminf") / puS
+        dqmaxf = cp.Parameter(shape=(L,1),value=dd[:,[dcline.QMAXF]],name="dqmaxf") / puS
+        dqmint = cp.Parameter(shape=(L,1),value=dd[:,[dcline.QMINT]],name="dqmint") / puS
+        dqmaxt = cp.Parameter(shape=(L,1),value=dd[:,[dcline.QMAXT]],name="dqmaxt") / puS
 
     # variables
     pf = cp.Variable((M,1), name="pf")  # line real power flows
@@ -267,9 +301,23 @@ def decoupled_acopf(
     if not curtailment is None:
         pc = cp.Variable(shape=(N,1), name="pc", nonneg=True) # real power demand curtailment
         qc = cp.Variable(shape=(N,1), name="qc") # reactive power demand curtailment
+    if L > 0:
+        dpf = cp.Variable(shape=(L,1), name="dpf",nonneg=True) # dc line real power from
+        dpt = cp.Variable(shape=(L,1), name="dpt",nonneg=True) # dc line real power to
+        dqf = cp.Variable(shape=(L,1), name="dqf") # dc line reactive power from
+        dqt = cp.Variable(shape=(L,1), name="dqt") # dc line reactive power to
 
     # sanity checks
     warnings = []
+
+    # cannot handle pl>0 or dpmin > 0
+    nz = np.where(pl.value>0)[0]
+    warnings.extend([f"gen[{n}].PMIN > 0 is not supported, using zero" for n in nz])
+    pl.value[nz,:] = 0
+    if L > 0:
+        nz = np.where(dpmin.value>0)[0]
+        warnings.extend([f"dcline[{n}].PMIN > 0 is not supported, using zero" for n in nz])        
+        dpmin.value[nz,:] = 0
 
     # bus vl/vu range
     if min(vu.value - vl.value) < 0 or min(vl.value) < 0.8 or max(vu.value) > 1.2:
@@ -307,6 +355,7 @@ def decoupled_acopf(
 
     # reference busses
     ref = [n for n, bt in enumerate(data["bus"][:, bus.BUS_TYPE]) if bt == 3]
+    assert len(ref) > 0, "no reference bus"
 
     # cost function
     cost = 0
@@ -322,15 +371,13 @@ def decoupled_acopf(
         qf == b @ vm, # Equation (1b)
 
         # Feasible Set 4
-        pl <= pg, pg <= pu, # Equation (3a)
+        # pl <= pg, # non-zero not supported
+        0 <= pg, pg <= pu, # Equation (3a)
         ql <= qg, qg <= qu, # Equation (3b)
         cp.abs(pf) <= s, # Equation (4a)
         cp.abs(qf) <= s,
         cp.abs(pf) + cp.abs(qf) <= 1.4 * s,
         vl <= vm, vm <= vu, # Equation (5a)
-
-        # practical constraints not specified in the mathematical model
-        va[ref] == 0,  # reference bus angles are always 0
     ]
 
     # small angle assumption
@@ -344,20 +391,34 @@ def decoupled_acopf(
         constraints.append(vm[gi] == vg)
 
     # curtailment
-    if curtailment is None:
+    if curtailment is None: # no curtailment allowed
+        pn = pd # net load without curtailment
+        qn = qd # net load without curtailment
+    else: # curtailment is allowed
+        pn = pd - pc # net load with curtailment
+        qn = qd - qc # net load with curtailment
         constraints += [
-            f @ pf + pd == g @ pg, # Equation (2a)
-            f @ qf + qd == g @ qg, # Equation (2b)
-        ]
-    else:
-        constraints += [
-            f @ pf + pd - pc == g @ pg, # Equation (2a) with load curtailment
-            f @ qf + qd - qc == g @ qg, # Equation (2b) with load curtailment
-
             pc <= pd, # real power curtailment limits
             cp.minimum(qc,0) >= cp.minimum(qd,0), # reactive power curtailment lower limits
             cp.maximum(qc,0) <= cp.maximum(qd,0), # reactive power curtailment upper limits
         ]
+
+    # dc lines
+    if L == 0:
+        constraints += [ # line flows without DC lines
+            f @ pf + pn == g @ pg, # Equation (2a)
+            f @ qf + qn == g @ qg, # Equation (2b)
+            ]
+    else:
+        constraints += [ # line flows with DC lines
+            f @ pf + pn + df @ dpf == g @ pg + dt @ dpt, # Equation (2a)
+            f @ qf + qn + df @ dqf == g @ qg + dt @ dqt, # Equation (2b)
+            dpt == cp.multiply(1-da,dpf) - db, # DC losses
+            # dpmin <= dpf, # non-zero not supported
+            0 <= dpf, dpf <= dpmax, # real power DC "to" injection limits
+            dqminf <= dqf, dqf <= dqmaxf, # reacation power DC "from" injection limits
+            dqmint <= dqt, dqt <= dqmaxf, # real power DC "to" injection limits
+            ]
 
     # problem statement
     objective = cp.Minimize(cost)
@@ -394,6 +455,23 @@ def decoupled_acopf(
         "warnings": warnings,
         "violations": {},
     }
+    if L > 0:
+        result["constants"].update({
+            # "dl (pu.MVAr)": dl.value.T[0],
+            "df (pu)": df.value.todense(), # TODO: remove todense
+            "dt (pu)": dt.value.todense(), # TODO: remove todense
+            "da (pu)": da.value.T[0],
+            "db (pu.MW)": db.value.T[0],
+            })
+        result["parameters"].update({
+            # "dm (pu)": dm.value,
+            "dpmin (pu.MW)": dpmin.value.T[0],
+            "dpmax (pu.MW)": dpmax.value.T[0],
+            "dqminf (pu.MVAr)": dqminf.value.T[0],
+            "dqmaxf (pu.MVAr)": dqmaxf.value.T[0],
+            "dqmint (pu.MVAr)": dqmint.value.T[0],
+            "dqmaxt (pu)": dqmaxt.value.T[0],
+            })
     if problem.status == "optimal":
         result["variables"] = {
             "pf (pu.MW)": pf.value.T[0],
@@ -404,8 +482,17 @@ def decoupled_acopf(
             "qg (pu.MVAr)": qg.value.T[0],
         }
         if not curtailment is None:
-            result["variables"]["pc (pu.MW)"] = pc.value.round(4).T[0]
-            result["variables"]["qc (pu.MVAr)"] = qc.value.round(4).T[0]
+            result["variables"].update({
+                "pc (pu.MW)": pc.value.round(4).T[0],
+                "qc (pu.MVAr)": qc.value.round(4).T[0],
+                })
+        if L > 0:
+            result["variables"].update({
+                "dpf (pu.MW)": dpf.value.round(4),
+                "dqf (pu.MVAr)": dqf.value.round(4),
+                "dpt (pu.MW)": dpt.value.round(4),
+                "dqt (pu.MVAr)": dqt.value.round(4),
+                })
 
         solution = copy(data)
         
@@ -428,6 +515,20 @@ def decoupled_acopf(
         gg = solution["gen"]
         gg[:,[gen.PG]] = pg.value * puS
         gg[:,[gen.QG]] = qg.value * puS
+        # gg[:,[gen.PMIN]] = np.zeros(shape=(K,1))
+        # gg[:,[gen.VG]] = vg.value
+
+        # update dcline
+        if L > 0: 
+            dd = solution["dcline"]
+            di = np.where(dd[:,dcline.BR_STATUS] == 1)[0]
+            dd[di,dcline.PF] = dpf.value.T[0] * puS
+            dd[di,dcline.QF] = dqf.value.T[0] * puS
+            dd[di,dcline.PT] = dpt.value.T[0] * puS
+            dd[di,dcline.QT] = dqt.value.T[0] * puS
+            # dd[:,dcline.PMIN] = np.zeros(shape=len(dd))
+            # dd[:,[dcline.VF]] = dvf.value
+            # dd[:,[dcline.VT]] = dvt.value
 
         result["solution"] = solution
         checks = violations(solution,formatter=dict)
@@ -443,7 +544,7 @@ def decoupled_acoce(
     data:dict,
     costs:dict[str,float]=None,
     margin:float=0.15,
-    allin:bool=True,
+    allin:bool=False,
     setpoints:float|bool|None=None,
     smallangles:float|None=None,
     **options) -> dict:
@@ -488,7 +589,7 @@ def decoupled_acoce(
       - `ok`: valid solution obtained flag (boolean)
       - `updates`: list of updates to model
 
-      In addition the following are included is the problem is feasible:
+      In addition the following are included when the problem is feasible:
       
       - `pf`: real power flow on branches
       - `qf`: reactive power flow on branches
@@ -534,6 +635,7 @@ def decoupled_acoce(
 
     # bus parameters
     N = len(data["bus"])
+    assert N > 1, "too few busses"
     bb = data["bus"]
     vl = cp.Constant(value=bb[:, [bus.VMIN]], name="vl") # voltage lower limit
     vu = cp.Constant(value=bb[:, [bus.VMAX]], name="vu") # voltage upper limit
@@ -543,6 +645,7 @@ def decoupled_acoce(
 
     # branch parameters
     M = len(data["branch"])
+    assert M > 0, "too few branches"
     br = data["branch"] # branch data
 
     f_bus = [bi[x] for x in br[:,branch.F_BUS]]
@@ -566,6 +669,7 @@ def decoupled_acoce(
     assert len(err) == 0, f"bus[{err},BR_X] <= 0"
 
     x = br_status/br_x/tap
+
     b = sp.sparse.coo_matrix((x,(range(M),f_bus)),shape=(M,N)) \
         - sp.sparse.coo_matrix(((x+shift),(range(M),t_bus)),shape=(M,N)) 
     b = cp.Constant(value=b, name="b") # line susceptances
@@ -575,13 +679,17 @@ def decoupled_acoce(
     f = cp.Constant(value=f, name="f") # line connections
 
     s = br[:,[branch.RATE_A]]/puS
+    s[s==0] = 1e5 # zero ratings are unlimited
     s = cp.Parameter(shape=(M,1),value=s,name="s") # line flow limits
 
     # gen parameters
     K = len(data["gen"])
+    assert K > 0, "too few generators"
     gg = data["gen"]
     gi = np.array([bi[n] for n in gg[:,gen.GEN_BUS]])
-    gs = 1 if allin else gg[:,gen.GEN_STATUS]
+    if allin:
+        gg[:,gen.GEN_STATUS] = 1
+    gs = gg[:,[gen.GEN_STATUS]]
     vg = cp.Parameter(shape=(K,1), value=gg[:,[gen.VG]], name="vg") # bus voltage setpoints
     pl = cp.Constant(value=gs*gg[:,[gen.PMIN]]/puS, name="pl") # real power minimum
     pu = cp.Constant(value=gs*gg[:,[gen.PMAX]]/puS, name="pu") # real power maximum
@@ -590,6 +698,30 @@ def decoupled_acoce(
     g = sp.sparse.coo_matrix((np.ones(K),(list(range(K)),gi)),shape=(K,N)).T # sum generators to busses
     g = cp.Constant(value=g,name="g") # sum generators to busses
 
+    # dc line parameters
+    L = len(data["dcline"]) if "dcline" in data else 0
+    if allin:
+        data["dcline",dcline.BR_STATUS] = np.ones(K)
+    if L > 0: # ignore DC line that are out of service
+        dc_status = data["dcline"][:,dcline.BR_STATUS].flatten()
+        dd = data["dcline"][dc_status!=0,:]
+        L = dd.shape[0]
+    if L > 0:
+        f_bus = [bi[x] for x in dd[:,dcline.F_BUS]]
+        t_bus = [bi[x] for x in dd[:,dcline.T_BUS]]
+        da = cp.Constant(value=dd[:,[dcline.LOSS1]], name="da") # dcline loss function first-order term
+        db = cp.Constant(value=dd[:,[dcline.LOSS0]], name="db")/puS # dcline loss function zero-order term
+        df = sp.sparse.coo_matrix((np.ones(L),(range(L),f_bus)),shape=(L,N)) 
+        df = cp.Constant(value=df.T, name="df") # from bus mapping
+        dt = sp.sparse.coo_matrix((np.ones(L),(range(L),t_bus)),shape=(L,N))
+        dt = cp.Constant(value=dt.T, name="dt") # to bus mapping
+        dpmin = cp.Parameter(shape=(L,1),value=dd[:,[dcline.PMIN]],name="dpmin") / puS
+        dpmax = cp.Parameter(shape=(L,1),value=dd[:,[dcline.PMAX]],name="dpmax") / puS
+        dqminf = cp.Parameter(shape=(L,1),value=dd[:,[dcline.QMINF]],name="dqminf") / puS
+        dqmaxf = cp.Parameter(shape=(L,1),value=dd[:,[dcline.QMAXF]],name="dqmaxf") / puS
+        dqmint = cp.Parameter(shape=(L,1),value=dd[:,[dcline.QMINT]],name="dqmint") / puS
+        dqmaxt = cp.Parameter(shape=(L,1),value=dd[:,[dcline.QMAXT]],name="dqmaxt") / puS
+
     # variables
     pf = cp.Variable((M,1), name="p")  # line real power flows
     qf = cp.Variable((M,1), name="q")  # line reactive power flows
@@ -597,6 +729,11 @@ def decoupled_acoce(
     va = cp.Variable((N,1), name="𝞱")  # voltage angles
     pg = cp.Variable((K,1), name="pg", nonneg=True)  # generator real power dispatch
     qg = cp.Variable((K,1), name="qg")  # generator reactive power dispatch
+    if L > 0:
+        dpf = cp.Variable(shape=(L,1), name="dpf",nonneg=True) # dc line real power from
+        dpt = cp.Variable(shape=(L,1), name="dpt",nonneg=True) # dc line real power to
+        dqf = cp.Variable(shape=(L,1), name="dqf") # dc line reactive power from
+        dqt = cp.Variable(shape=(L,1), name="dqt") # dc line reactive power to
 
     # softened constraint variables
     ac = cp.Variable(shape=(N,1), name="ac") # capacitor/condensor additions
@@ -604,31 +741,17 @@ def decoupled_acoce(
     aq = cp.Variable(shape=(K,1), name="aq", nonneg=True) # generator reactive power additions
     al = cp.Variable(shape=(M,1), name="al", nonneg=True) # powerline/transformer capacity additions
 
-    # dc line parameters
-    L = len(data["dcline"]) if "dcline" in data else 0
-    if L > 0:
-        dd = data["dcline"]
-        f_bus = [bi[x] for x in dd[:,dcline.F_BUS]]
-        t_bus = [bi[x] for x in dd[:,dcline.T_BUS]]
-        dc_status = dd[:,dcline.BR_STATUS].flatten()
-        dm = cp.Constant(
-            value=dd[:,[dcline.PMIN,dcline.PMAX,dcline.QMINF,dcline.QMAXF,dcline.QMINT,dcline.QMAXT]],
-            name="dm") # dcline flow limits
-        dl = cp.Constant(value=dd[:,[dcline.LOSS1,dcline.LOSS0]], name="l0") # dcline losses
-        df = sp.sparse.coo_matrix((dc_status,(range(L),f_bus)),shape=(L,N)) 
-        df = cp.Constant(value=df, name="df") # from bus mapping
-        dt = sp.sparse.coo_matrix((dc_status,(range(L),t_bus)),shape=(L,N))
-        dt = cp.Constant(value=dt, name="dt") # to bus mapping
-        dp = cp.Variable(shape=(L,2), name="df") # dc line real power from and to
-        dq = cp.Variable(shape=(L,2), name="df") # dc line reactive power from and to
-        dv = cp.Variable(shape=(L,2), name="vf") # dc line voltage setpoint from and to
-        # print("dm=",dm.value,sep="\n")
-        # print("dl=",dl.value,sep="\n")
-        # print("df=",df.value.todense(),sep="\n")
-        # print("dt=",dt.value.todense(),sep="\n")
-
     # sanity checks
     warnings = []
+
+    # cannot handle pl>0 or dpmin > 0
+    nz = np.where(pl.value>0)[0]
+    warnings.extend([f"gen[{n}].PMIN > 0 is not supported, using zero" for n in nz])
+    pl.value[nz,:] = 0
+    if L > 0:
+        nz = np.where(dpmin.value>0)[0]
+        warnings.extend([f"dcline[{n}].PMIN > 0 is not supported, using zero" for n in nz])        
+        dpmin.value[nz,:] = 0
 
     # bus vl/vu range
     if min(vu.value - vl.value) < 0 or min(vl.value) < 0.8 or max(vu.value) > 1.2:
@@ -660,10 +783,6 @@ def decoupled_acoce(
         for n in np.where(vg.value > 1.2)[0]:
             warnings.append(f"gen[{n}].vg > 1.2")
 
-    # dc line ranges
-    if L > 0:
-        warnings.append("dclines are not supported")
-
     # warn of check failures
     if warnings:
         warn(f"{len(warnings)} model warnings (see 'warnings' for details)")
@@ -689,8 +808,6 @@ def decoupled_acoce(
         # Feasible Set 2
         pf == b @ va, # Equation (1a)
         qf == b @ vm, # Equation (1b)
-        f @ pf + pd*(1+margin) == g @ pg, # Equation (2c)
-        f @ qf + qd*(1+margin) + ac == g @ qg, # Equation (2d)
 
         # Feasible Set 4
         pl <= pg, pg <= pu + ap, # Equation (3c)
@@ -710,6 +827,23 @@ def decoupled_acoce(
         cp.abs(qu) + aq <= pu + ap,
         cp.abs(ql) + aq <= pu + ap,
     ]
+
+    # dc lines
+    if L == 0:
+        constraints += [ # line flows without DC lines
+            f @ pf + pd*(1+margin) == g @ pg, # Equation (2a)
+            f @ qf + qd*(1+margin) + ac == g @ qg, # Equation (2b)
+            ]
+    else:
+        constraints += [ # line flows with DC lines
+            f @ pf + pd*(1+margin) + df @ dpf == g @ pg + dt @ dpt, # Equation (2a)
+            f @ qf + qd*(1+margin) + ac + df @ dqf == g @ qg + dt @ dqt, # Equation (2b)
+            dpt == cp.multiply(1-da,dpf) - db, # DC losses
+            # dpmin <= dpf, # non-zero not supported
+            0 <= dpf, dpf <= dpmax, # real power DC "to" injection limits
+            dqminf <= dqf, dqf <= dqmaxf, # reacation power DC "from" injection limits
+            dqmint <= dqt, dqt <= dqmaxf, # real power DC "to" injection limits
+            ]
 
     # small angle assumption
     if not smallangles is None:
@@ -818,6 +952,18 @@ def decoupled_acoce(
                 updates.append(f"add {x:.3f} MVA to branch[{n},RATE_A]")
         result["updates"] = updates
 
+        # update dcline
+        if L > 0: 
+            dd = solution["dcline"]
+            di = np.where(dd[:,dcline.BR_STATUS] == 1)[0]
+            dd[di,dcline.PF] = dpf.value.T[0] * puS
+            dd[di,dcline.QF] = dqf.value.T[0] * puS
+            dd[di,dcline.PT] = dpt.value.T[0] * puS
+            dd[di,dcline.QT] = dqt.value.T[0] * puS
+            # dd[:,dcline.PMIN] = np.zeros(shape=len(dd))
+            # dd[:,[dcline.VF]] = dvf.value
+            # dd[:,[dcline.VT]] = dvt.value
+
         # create violations list
         checks = violations(solution,formatter=dict)
         if checks:
@@ -851,7 +997,7 @@ def internals(case,
     return "\n".join([f"\n{x}\n{'-'*len(x)}\n\n  {dump(y)}" for x,y in case.items() if x in keys])
 
 def violations(data, 
-    precision:float=4, # rounding on data before checking
+    precision:float=-1, # rounding on data before checking
     error:float=0.02, # error margin on tests
     formatter:str|Callable=None, # formatting call for results (or "counter","table",None)
     ) -> int|str|dict:
@@ -895,10 +1041,12 @@ def violations(data,
     # check generators
     if "gen" in data:
         for n, g in enumerate(data["gen"][
-                :, (gen.PG, gen.QG, gen.PMIN, gen.PMAX, gen.QMIN, gen.QMAX)
+                :, (gen.GEN_STATUS,gen.PG, gen.QG, gen.PMIN, gen.PMAX, gen.QMIN, gen.QMAX)
             ].round(precision)
         ):
-            PG, QG, PMIN, PMAX, QMIN, QMAX = map(float, g)
+            STATUS, PG, QG, PMIN, PMAX, QMIN, QMAX = map(float, g)
+            if STATUS == 0 or PG == 0:
+                continue
             if PMIN < PMAX and not PMIN*(1-error) <= PG <= PMAX*(1+error):
                 result["gen"].append((n, f"{PG=} MW outside ({PMIN=},{PMAX=})"))
             if QMIN >= 0 and QMIN < QMAX and not QMIN*(1-error) <= QG <= QMAX*(1+error):
@@ -908,22 +1056,24 @@ def violations(data,
     
     # check branches
     if "branch" in data and data["branch"].shape[1] >= branch.PF:
-        for n, b in enumerate(data["branch"][:,(branch.PF,branch.RATE_A)]):
-            PF, RATE_A = map(float, np.abs(b))
-            if RATE_A > 0 and PF > RATE_A*(1+error):
+        for n, b in enumerate(data["branch"][:,(branch.BR_STATUS,branch.PF,branch.RATE_A)]):
+            STATUS, PF, RATE_A = map(float, np.abs(b))
+            if STATUS == 1 and RATE_A > 0 and PF > RATE_A*(1+error):
                 result["branch"].append((n, f"|PF|={PF:.1f} MVA outside (0,{RATE_A=:.1f})"))
 
     # check dclines
     if "dcline" in data and data["dcline"].shape[1]:
         for n,d in enumerate(data["dcline"][
-                :,(dcline.PF,dcline.QF,dcline.PT,dcline.QT,dcline.PMIN,dcline.PMAX,
+                :,(dcline.BR_STATUS,dcline.PF,dcline.QF,dcline.PT,dcline.QT,dcline.PMIN,dcline.PMAX,
                     dcline.QMINF,dcline.QMAXF,dcline.QMINT,dcline.QMAXT)]):
-            PF,QF,PT,QT,PMIN,PMAX,QMINF,QMAXF,QMINT,QMAXT = map(float,d)
-            if not PMIN <= PF <= PMAX:
+            STATUS,PF,QF,PT,QT,PMIN,PMAX,QMINF,QMAXF,QMINT,QMAXT = map(float,d)
+            if STATUS == 0 or PF == 0:
+                continue
+            if not PMIN*(1-error) <= PF <= PMAX*(1+error):
                 result["dcline"].append((n,f"{PF=} outside ({PMIN=},{PMAX=})"))
-            if not QMINF <= QF <= QMAXF:
+            if not QMINF*(1+error) <= QF <= QMAXF*(1+error):
                 result["dcline"].append((n,f"{QF=} outside ({QMINF=},{QMAXF=})"))
-            if not QMINT <= QT <= QMAXT:
+            if not QMINT*(1+error) <= QT <= QMAXT*(1+error):
                 result["dcline"].append((n,f"{QT=} outside ({QMINT=},{QMAXT=})"))
 
     match formatter:
@@ -960,7 +1110,7 @@ def as_frames(data:dict,
         kwargs = dict(bus="BUS_I,BUS_TYPE,PD,QD,BS,VM,VA,VMAX,VMIN",
                       branch="F_BUS,T_BUS,BR_STATUS,BR_X,RATE_A,PF,QF",
                       gen="GEN_BUS,GEN_STATUS,PG,QG,PMIN,PMAX,QMIN,QMAX",
-                      dcline="F_BUS,T_BUS,BR_STATUS,PF,PT,PMIN,PMAX,QF,QT,QMINF,QMAXF,QMINT,QMAXT",
+                      dcline="F_BUS,T_BUS,BR_STATUS,PF,PT,PMIN,PMAX,QF,QT,QMINF,QMAXF,QMINT,QMAXT,LOSS0,LOSS1",
                      )
     columns = {
         "bus":"BUS_I,BUS_TYPE,PD,QD,GS,BS,BUS_AREA,VM,VA,BASE_KV,ZONE,VMAX,VMIN,LAM_P,LAM_Q,MU_VMAX,MY_VMIN",
@@ -1049,7 +1199,7 @@ def as_mermaid(case,
             for i,pd,qd,vm,va,vmin,vmax in nodes if vmin <= vm <= vmax and va != 0.0])
         result.extend([f"  {int(i)}[{int(i)}]:::bus" 
             for i,pd,qd,vm,va,vmin,vmax in nodes if vm == 1.0 and va == 0.0])
-        result.extend([f"""  {int(i)} ==>|{qd:+.1f}j MVAr| L{int(i)}@{{ shape: tri, label: "{pd:+.1f} MW"}} """ 
+        result.extend([f"""  {int(i)} -->|{qd:+.1f}j MVAr| L{int(i)}@{{ shape: tri, label: "{pd:+.1f} MW"}} """ 
             for i,pd,qd,va,vm,vmin,vmax in nodes if pd**2 + qd**2 > 0])
 
     if "gen" in case:
@@ -1058,14 +1208,14 @@ def as_mermaid(case,
             for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 > 0 and pmin <= p <= pmax and qmin <= q <= qmax])
         result.extend([f"  G{int(b)}(({pmax:.0f} MW)):::genhot -->|{p:+.1f}{q:+.1f}j MVA| {int(b)} " 
             for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 > 0 and not ( pmin <= p <= pmax and qmin <= q <= qmax ) ])
-        result.extend([f"  G{int(b)}(({pmax:.0f} MW)) -. X .-> {int(b)} " 
+        result.extend([f"  G{int(b)}(({pmax:.0f} MW)) -.-> {int(b)} " 
             for b,p,q,pmin,pmax,qmin,qmax in gens if p**2+q**2 == 0])
 
     if "branch" in case:
         lines = case["branch"][:,[branch.F_BUS,branch.T_BUS,branch.PF,branch.QF,branch.RATE_A]]
         if line_order is not None:
             lines = lines[line_order]
-        result.extend([f"  {int(f)} -. X .-> {int(t)}" 
+        result.extend([f"  {int(f)} -.-> {int(t)}" 
             for f,t,p,q,m in lines if p**2+q**2==0])
         result.extend([f"  {int(f)} -->|<font color={'red' if abs(p)>m else 'black'}>{p:+.1f}{q:+.1f}j MVA</font>| {int(t)}" 
             if f > 0 else f"  {int(t)} -->|<font color= {'red' if abs(p)>m else 'black'}>{-p:+.1f}{-q:+.1f}j MVA</font>| {int(f)}"
@@ -1075,7 +1225,7 @@ def as_mermaid(case,
         lines = case["dcline"][:,[dcline.F_BUS,dcline.T_BUS,dcline.PF,dcline.QF,dcline.PMAX]]
         if line_order is not None:
             lines = lines[line_order]
-        result.extend([f"  {int(f)} -. X .-> {int(t)}" 
+        result.extend([f"  {int(f)} -.-> {int(t)}" 
             for f,t,p,q,m in lines if p**2+q**2==0])
         result.extend([f"  {int(f)} ==>|<font color={'red' if abs(p)>m else 'black'}>{p:+.1f}{q:+.1f}j MVA</font>| {int(t)}" 
             if f > 0 else f"  {int(t)} ==>|<font color= {'red' if abs(p)>m else 'black'}>{-p:+.1f}{-q:+.1f}j MVA</font>| {int(f)}"

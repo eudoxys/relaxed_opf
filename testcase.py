@@ -25,11 +25,17 @@ result = full_acopf(case,VERBOSE=0,OUT_ALL=0)
 print(f"""Initial AC OPF.......... {result["status"]} in {result["time"]:.2f} s""",flush=True)
 if result["ok"] and violations(result,formatter="counter"):
     print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
+# print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(result["solution"]).items()],sep="\n",flush=True)
 
 result = decoupled_acopf(case)
 print(f"""Initial FD OPF.......... {result["status"]} in {result["time"]:.2f} s""",flush=True)
-if result["ok"] and violations(result,formatter="counter"):
-    print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
+if result["ok"]:
+    if violations(result,formatter="counter"):
+        print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
+    # print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(result["solution"]).items()],sep="\n",flush=True)
+# else:
+#     print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(result["case"]).items()],sep="\n",flush=True)
+#     print(internals(result))
 if result["warnings"]:
     print("WARNINGS:",*result["warnings"],sep="\n  - ")
 
@@ -73,3 +79,5 @@ if not result["ok"] or violations(result,formatter="counter") > 0:
             print("",*violations(result,formatter="table").split("\n"),"",sep="\n  ")
 
         print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(result["solution"]).items()],sep="\n")
+# else:
+#     print(*[f"\n*** {x} ***\n\n{y}" for x,y in as_frames(result["solution"]).items()],sep="\n",flush=True)
