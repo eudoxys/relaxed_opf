@@ -1,7 +1,7 @@
 import marimo
 
-__generated_with = "0.23.2"
-app = marimo.App(width="medium")
+__generated_with = "0.23.4"
+app = marimo.App(width="full")
 
 
 @app.cell(hide_code=True)
@@ -172,6 +172,29 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    In cases where $\underline p_i > 0$, it should be noted that generators must be constrained to $0 \le p_i \le \overline p_i$. Thus the minimum generation dispatch constraint is removed in order to allow zero dispatch of generators, if necessary.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    When DC lines are included in the network model, additional constraints must be provided relating only the DC lines to define **Feasible Set 5**.
+    $$
+    \begin{array}{lr}
+        \textrm{Feasible Set 4:} & (1) - (5) \\
+        p_i = p_j + a_{ij} p_{ij} + c_{ij} & (6)\\
+    \end{array}
+    $$
+    where $a_{ij}$ are the losses proportional to power flow on the DC line from bus $i$ to bus $j$ and $c_{ij}$ are the constant losses.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     ## Study Case
     """)
     return
@@ -180,25 +203,23 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    A modified IEEE 4-bus test system [2] illustrates the conditions for which optimal sizing and placement may be required, specifically there is insufficient generation capacity, voltage support, and line capacity for optimal powerflow feasibility. In addition, the generator cost function is reduced to a unity linear function.
+    A modified IEEE test system [2] illustrates the conditions for which optimal sizing and placement may be required, specifically there is insufficient generation capacity, voltage support, and line capacity for optimal powerflow feasibility. In addition, the generator cost function is reduced to a unity linear function.
     """)
     return
 
 
 @app.cell
 def _(solvers):
-    name,line_order = (
-        ("case4r",[0,2,1,3,4]),
-        ("case9m",[3,0,1,2,4,5,6,7,8]),
-        ("case9dc",None)
-    )[2] # pick one
+    #name,line_order = "case4r",[0,2,1,3,4])
+    #name,line_order = "case9m",[3,0,1,2,4,5,6,7,8])
+    name,line_order = "case9dc",None
     case = solvers.load(name)
     return case, line_order, name
 
 
 @app.cell
 def _(case, show_data, solvers):
-    base_solution = solvers.full_acpf(case,VERBOSE=0,OUT_ALL=0)
+    base_solution = solvers.full_acpf(case)
     show_data(base_solution["solution"],"Table 1: Base case data")
     return (base_solution,)
 
@@ -250,7 +271,7 @@ def _(mo):
 
 @app.cell
 def _(case, solvers):
-    initial_powerflow = solvers.full_acpf(case, VERBOSE=0, OUT_ALL=0)
+    initial_powerflow = solvers.full_acpf(case)
     return (initial_powerflow,)
 
 
@@ -280,7 +301,6 @@ def _(initial_powerflow, line_order, mo, name, solvers):
 
 @app.cell
 def _(initial_powerflow, name, show_data):
-    # mo.accordion(solvers.as_frames(initial_powerflow["solution"],True))
     show_data(
         initial_powerflow["solution"],
         caption=f"Table 2(a): Initial full AC powerflow solution of `{name}`",
@@ -319,13 +339,6 @@ def _(initial_opf, mo):
     return
 
 
-@app.cell
-def _(initial_opf, show_violations):
-    # mo.mermaid(solvers.as_mermaid(initial_opf["solution"],line_order=line_order))
-    show_violations(initial_opf["solution"],caption="Table 3: Constraint violations after solving the full AC optimal powerflow with `pypower`.")
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -346,12 +359,6 @@ def _(decoupled_opf, mo):
     mo.md(rf"""
     The decoupled optimal powerflow problem must also satisfy Feasible Set 4 and the solver reports that it is {decoupled_opf["status"].lower()} as presented in the base case.
     """)
-    return
-
-
-@app.cell
-def _(decoupled_opf, line_order, mo, solvers):
-    mo.mermaid(solvers.as_mermaid(decoupled_opf["solution"],line_order=line_order))
     return
 
 
@@ -407,7 +414,8 @@ def _(mo):
         & \underline p_i \le p_i \le \bar p_i + g_i & (3c) \\
         & \underline q_i - h_i \le q_i \le \bar q_i + h_i & (3d) \\
         & |p_{ij}| \le \bar s_{ij} + d_{ij} & (4b)\\
-        & \underline v_i \le |v_i| \le \bar v_i & (5b)
+        & \underline v_i \le |v_i| \le \bar v_i & (5b) \\
+        & p_i = p_j + a_{ij} p_{ij} + c_{ij} & (6)
     \end{array}
     $$
     """)
@@ -416,7 +424,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(case, mo, solvers):
-    decoupled_osp = solvers.decoupled_acosp(case)
+    decoupled_osp = solvers.decoupled_acoce(case)
     mo.md(rf"""
     and the decoupled AC OSP reports the result is "{decoupled_osp["status"].lower()} with the results shown in Tables (4a) and (4b)".
     """)
@@ -452,7 +460,7 @@ def _(mo):
     mo.md(r"""
     # WECC 240 Model
 
-    This section applies the OSP method described above to a modified WECC 240-bus model that cannot be otherwise solved.
+    This section applies the OCE method described above to a modified WECC 240-bus model that cannot be otherwise solved.
     """)
     return
 
@@ -460,12 +468,20 @@ def _(mo):
 @app.cell
 def _(solvers):
     wecc=solvers.load("case240_2011")
-    return
+    return (wecc,)
 
 
 @app.cell
-def _():
-    # solvers.decoupled_acosp(wecc)
+def _(mo, solvers, wecc):
+    optimized = solvers.decoupled_acoce(wecc)
+    solution = solvers.full_acpf(optimized["solution"])
+    mo.accordion(solvers.as_frames(solution["solution"]))
+    return (solution,)
+
+
+@app.cell
+def _(solution, solvers):
+    solvers.violations(solution["solution"])
     return
 
 
