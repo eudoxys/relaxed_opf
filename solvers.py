@@ -22,6 +22,9 @@ from pypower import idx_cost as cost
 from pypower import idx_dcline
 dcline = namedtuple("dcline",idx_dcline.c.keys())(**idx_dcline.c)
 
+pp_options = {"VERBOSE": 0, "OUT_ALL": 0}
+cvx_options = {"canon_backend": "SCIPY"}
+
 def load(case:dict,name:str=None) -> dict:
     """Fix case to include branch line flows"""
 
@@ -68,8 +71,10 @@ def load(case:dict,name:str=None) -> dict:
 def full_acpf(case:dict,**kwargs) -> dict:
     """Solve full AC powerflow"""
     tic = time()
+    options = pp_options
+    options.update(kwargs)
     try:
-        result,ok = runpf(copy(case),ppoption(**kwargs))
+        result,ok = runpf(copy(case),ppoption(**options))
         if ok:
             solution = {x:np.array(y) for x,y in result.items() if x in case}
 
@@ -108,8 +113,10 @@ def full_acpf(case:dict,**kwargs) -> dict:
 def full_acopf(case:dict,**kwargs) -> dict:
     """Solve full AC optimal powerflow"""
     tic = time()
+    options = pp_options
+    options.update(kwargs)
     try:
-        result = runopf(copy(case),ppoption(**kwargs))
+        result = runopf(copy(case),ppoption(**options))
         solution = {x:np.array(y) for x,y in result.items() if x in case}
 
         # shift reference bus angle to 0
@@ -150,7 +157,7 @@ def decoupled_acopf(
     curtailment:float=None,
     setpoints:float|bool|None=None,
     smallangles:float|None=None,
-    **options,
+    **kwargs,
     ) -> dict:
     """Solve decoupled optimal powerflow problem
     
@@ -197,8 +204,8 @@ def decoupled_acopf(
     tic = time()
 
     # default options
-    if "canon_backend" not in options:
-        options["canon_backend"] = "SCIPY"
+    options = cvx_options
+    options.update(kwargs)
 
     # model check
     assert "baseMVA" in data, "missing baseMVA value"
