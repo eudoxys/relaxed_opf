@@ -147,6 +147,7 @@ def full_acopf(case:dict,**kwargs) -> dict:
             "warnings": [],
             "message": str(err),
         }
+        raise
 
     toc = time()
     result["time"] = round(toc-tic,3)
@@ -1292,6 +1293,8 @@ if __name__ == '__main__':
             initial_acopf = full_acopf(case,**ppoptions)
             print("STATUS:",initial_acopf["status"],file=fh)
             print(f"TIME: {initial_acopf['time']:.3f} s",file=fh)
+            if "message" in initial_acopf:
+                print(f"MESSAGE: {initial_acopf['message']}",file=fh)
             results[name]["Initial AC OPF"] = initial_acopf["status"] if not initial_acopf["ok"] else ("warning" if initial_acopf["warnings"] else "ok")
             if initial_acopf["ok"]:
                 print(*[f"{x}:\n{y}\n" for x,y in as_frames(initial_acopf["solution"]).items()],sep="\n",file=fh)
@@ -1352,6 +1355,8 @@ if __name__ == '__main__':
                         final_opf = decoupled_acopf(fast_acoce["solution"])
                         print("STATUS:",final_opf["status"],file=fh)
                         print(f"TIME: {final_opf['time']:.3f} s",file=fh)
+                        if "message" in initial_acopf:
+                            print(f"MESSAGE: {initial_acopf['message']}",file=fh)
                         results[name]["Final FD OPF"] = final_opf["status"] if not final_opf["ok"] else ("warning" if final_opf["warnings"] else "ok")
                         if final_opf["ok"]:
                             print(*[f"{x}:\n{y}\n" for x,y in as_frames(final_opf["solution"]).items()],sep="\n",file=fh)

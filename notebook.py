@@ -8,12 +8,12 @@ app = marimo.App(width="full")
 def _(mo):
     mo.md(r"""
     <center>
-    <font size=5><b>Optimal capacity expansion using softened relaxed optimal powerflow</b></font><br/>
+    <font size=5><b>Optimal capacity expansion using softened relaxed AC optimal powerflow</b></font><br/>
         David P. Chassin, <i>Eudoxys Sciences LLC</i><br/>
         April 2026
     </center>
 
-    **Citation**: D.P. Chassin, "Optimal sizing and placement using softened relaxed optimal powerflow", April 2026. URL: https://github.com/eudoxys/relaxed_opf.
+    **Citation**: D.P. Chassin, "Optimal sizing and placement using softened relaxed optimal powerflow", April 2026. URL: https://github.com/eudoxys/fast_oce.
     """)
     return
 
@@ -480,8 +480,22 @@ def _(mo, solvers, wecc):
 
 
 @app.cell
-def _(solution, solvers):
-    solvers.violations(solution["solution"])
+def _():
+    # mo.accordion(optimized)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The following violations are observed.
+    """)
+    return
+
+
+@app.cell
+def _(show_violations, solution):
+    show_violations(solution["solution"])
     return
 
 
